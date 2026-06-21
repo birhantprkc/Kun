@@ -17,6 +17,7 @@ import type {
 
 export type ModelProviderPresetId =
   | 'litellm'
+  | 'longcat'
   | 'zhipu-coding-plan'
   | 'zai-coding-plan'
   | 'kimi-code'
@@ -205,6 +206,18 @@ export const MODEL_PROVIDER_PRESETS: ModelProviderPreset[] = [
     models: [],
     docsUrl: 'https://docs.litellm.ai/docs/',
     apiKeyUrl: 'https://docs.litellm.ai/docs/proxy/quick_start'
+  },
+  {
+    id: 'longcat',
+    name: 'LongCat',
+    baseUrl: 'https://api.longcat.chat/openai',
+    endpointFormat: 'chat_completions',
+    models: ['LongCat-2.0-Preview'],
+    modelProfiles: {
+      'LongCat-2.0-Preview': textChatProfile(1_000_000)
+    },
+    docsUrl: 'https://longcat.chat/platform/docs/zh/',
+    apiKeyUrl: 'https://longcat.chat/platform/'
   },
   {
     id: 'zhipu-coding-plan',

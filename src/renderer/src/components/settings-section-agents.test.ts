@@ -649,8 +649,9 @@ describe('AgentsSettingsSection Kun diagnostics smoke', () => {
     })
   })
 
-  it('defines coding provider presets for the Providers menu', () => {
+  it('defines OpenAI-compatible provider presets for the Providers menu', () => {
     const expected = [
+      ['longcat', 'LongCat', 'https://api.longcat.chat/openai'],
       ['zhipu-coding-plan', 'Zhipu Coding Plan', 'https://open.bigmodel.cn/api/coding/paas/v4/chat/completions', 'custom_endpoint'],
       ['zai-coding-plan', 'Z.ai Coding Plan', 'https://api.z.ai/api/coding/paas/v4/chat/completions', 'custom_endpoint'],
       ['kimi-code', 'Kimi Code', 'https://api.kimi.com/coding/v1'],
