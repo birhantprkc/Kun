@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactElement } from 'react'
-import { AlertCircle, CheckCircle2, Copy, Download, Loader2, LogIn } from 'lucide-react'
+import { AlertCircle, CheckCircle2, Copy, Loader2, LogIn } from 'lucide-react'
 import type { ModelProviderProfileV1 } from '@shared/app-settings-types'
 import { SecretInput } from './settings-controls'
 
@@ -169,23 +169,10 @@ export function ClaudeSubscriptionSection({
         </p>
       ) : null}
 
-      {onModelsChange ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            disabled={modelsBusy}
-            onClick={() => void fetchModels(provider.apiKey)}
-            className="inline-flex h-7 items-center gap-1.5 rounded-full border border-ds-border bg-ds-card px-2.5 text-[12px] font-medium text-ds-muted transition hover:bg-ds-hover hover:text-ds-ink disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {modelsBusy ? (
-              <Loader2 className="h-3 w-3 animate-spin" strokeWidth={1.9} />
-            ) : (
-              <Download className="h-3 w-3" strokeWidth={1.9} />
-            )}
-            {modelsBusy ? t('claudeSubModelsFetching') : t('claudeSubModelsRefresh')}
-          </button>
-          {modelsNote ? <span className="text-[12px] text-ds-muted">{modelsNote}</span> : null}
-        </div>
+      {modelsBusy ? (
+        <p className="text-[12px] text-ds-muted">{t('claudeSubModelsFetching')}</p>
+      ) : modelsNote ? (
+        <p className="text-[12px] text-ds-muted">{modelsNote}</p>
       ) : null}
 
       <div className="flex items-center gap-2 rounded-lg border border-ds-border bg-ds-card px-3 py-2">

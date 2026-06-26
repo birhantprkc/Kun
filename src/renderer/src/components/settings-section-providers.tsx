@@ -853,6 +853,29 @@ export function ProvidersSettingsSection({ ctx }: { ctx: Record<string, any> }):
     // of probing api.anthropic.com, which would 401 on the x-api-key header.
     if (isAgentSdkProvider(target)) {
       setProbeStates((prev) => ({ ...prev, [target.id]: { fingerprint, mode, status: 'busy' } }))
+      if (mode === 'fetch') {
+        // No HTTP /models endpoint — list the subscription's models via the SDK.
+        let modelIds: string[] = []
+        try {
+          modelIds = await window.kunGui.claudeSubscriptionModels(target.apiKey.trim() || undefined)
+        } catch {
+          modelIds = []
+        }
+        if (modelIds.length > 0) {
+          setProbeStates((prev) => ({
+            ...prev,
+            [target.id]: { fingerprint, mode, status: 'ok', latencyMs: 0, total: modelIds.length }
+          }))
+          setPendingImport({ providerId: target.id, modelIds: [...modelIds], latencyMs: 0 })
+        } else {
+          setProbeStates((prev) => ({
+            ...prev,
+            [target.id]: { fingerprint, mode, status: 'error', message: t('claudeSubProbeNotReady') }
+          }))
+        }
+        return
+      }
+      // mode === 'test': report login/token readiness instead of an HTTP probe.
       let ready = target.apiKey.trim().length > 0
       if (!ready) {
         try {
