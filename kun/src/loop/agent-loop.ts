@@ -89,6 +89,7 @@ import { guiPlanWorkspaceMatches } from '../shared/gui-plan.js'
 import { GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME } from '../adapters/tool/goal-tools.js'
 import { TODO_LIST_TOOL_NAME, TODO_WRITE_TOOL_NAME } from '../adapters/tool/todo-tools.js'
 import { shellRuntimeInstruction } from '../adapters/tool/builtin-tool-utils.js'
+import { VERIFY_CHANGES_TOOL_NAME } from '../adapters/tool/builtin-verify-tool.js'
 import {
   GoalResumeCoordinator,
   DEFAULT_MAX_GOAL_RESUME_NO_PROGRESS_ATTEMPTS,
@@ -283,6 +284,65 @@ export function resolvePlanModeToolSpecs(
         (tool) => tool.name === planTool || readOnly.has(tool.name) || interactive.has(tool.name)
       )
     : toolSpecs.filter((tool) => tool.name === planTool)
+}
+
+// Source files a `verify_changes` run can meaningfully validate (Vitest/tsc).
+// Documents and HTML written in write / design / SDD modes never match, so
+// those modes are never nudged to run code verification.
+const VERIFIABLE_SOURCE_PATH = /\.[cm]?[jt]sx?$/i
+
+function fileChangeResultPath(item: TurnItem): string | null {
+  if (item.kind !== 'tool_result') return null
+  const output = item.output
+  if (!output || typeof output !== 'object') return null
+  const record = output as Record<string, unknown>
+  const path = record.relative_path ?? record.path
+  return typeof path === 'string' ? path : null
+}
+
+/**
+ * Whether this turn changed real source files (.ts/.js family) that a later
+ * `verify_changes` run has not yet covered. Only successful, non-plan
+ * file-change results with a source-code path count — so writing docs or HTML
+ * (write / design / SDD modes) never asks for code verification, and a denied
+ * or failed edit never does either. Used only to surface an optional nudge;
+ * verification is never forced.
+ */
+export function turnHasUnverifiedSourceChanges(
+  items: readonly TurnItem[],
+  turnId: string
+): boolean {
+  let lastSourceChangeIndex = -1
+  let lastVerificationIndex = -1
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]
+    if (!item || item.turnId !== turnId || item.kind !== 'tool_result') continue
+    if (item.toolName === VERIFY_CHANGES_TOOL_NAME) {
+      lastVerificationIndex = index
+      continue
+    }
+    if (
+      item.toolKind === 'file_change' &&
+      item.toolName !== CREATE_PLAN_TOOL_NAME &&
+      item.isError !== true
+    ) {
+      const path = fileChangeResultPath(item)
+      if (path && VERIFIABLE_SOURCE_PATH.test(path)) lastSourceChangeIndex = index
+    }
+  }
+  return lastSourceChangeIndex >= 0 && lastSourceChangeIndex > lastVerificationIndex
+}
+
+/**
+ * A soft, optional nudge to run acceptance checks after source edits. The loop
+ * never forces `verify_changes` — the model decides whether validation applies.
+ */
+function verificationSuggestionInstruction(): string {
+  return [
+    'You changed source files in this turn.',
+    `If these are code changes, consider running \`${VERIFY_CHANGES_TOOL_NAME}\` to run the project's adjacent tests and typecheck before finishing.`,
+    'This is optional — skip it when verification does not apply.'
+  ].join(' ')
 }
 
 /**
@@ -1465,6 +1525,10 @@ export class AgentLoop {
       toolSpecs.some((tool) => tool.name === CREATE_PLAN_TOOL_NAME)
         ? CREATE_PLAN_TOOL_NAME
         : undefined
+    const suggestVerification =
+      !planTurnActive &&
+      toolSpecs.some((tool) => tool.name === VERIFY_CHANGES_TOOL_NAME) &&
+      turnHasUnverifiedSourceChanges(historyItems, turnId)
     const effectiveToolSpecs = resolvePlanModeToolSpecs(toolSpecs, {
       planTurnActive,
       createPlanSatisfied,
@@ -1511,6 +1575,7 @@ export class AgentLoop {
       ...skillResolution.instructions,
       ...(userInputDisabled ? [userInputUnavailableInstruction()] : []),
       ...(effectiveToolSpecs.some((tool) => tool.name === 'bash') ? [shellRuntimeInstruction()] : []),
+      ...(suggestVerification ? [verificationSuggestionInstruction()] : []),
       ...(toolCatalogDriftMessage ? [toolCatalogDriftMessage] : [])
     ]
     await this.recordPipelineStage(threadId, turnId, 'input_remembered', {
