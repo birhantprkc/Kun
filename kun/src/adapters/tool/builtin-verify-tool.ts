@@ -2,7 +2,7 @@ import { access, readFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import type { LocalTool } from './local-tool-host.js'
-import { terminateSpawnTree, workspaceRoot } from './builtin-tool-utils.js'
+import { shellSpawnEnv, terminateSpawnTree, workspaceRoot } from './builtin-tool-utils.js'
 
 export const VERIFY_CHANGES_TOOL_NAME = 'verify_changes'
 
@@ -83,8 +83,7 @@ export function createVerifyChangesLocalTool(
             changed_files: changedFiles,
             checks: [],
             summary: 'No supported project verification scripts were found.'
-          },
-          isError: true
+          }
         }
       }
 
@@ -282,7 +281,7 @@ async function runVerificationCommand(
   return await new Promise((resolvePromise) => {
     const child = spawn(command.command, command.args, {
       cwd: command.cwd,
-      env: process.env,
+      env: shellSpawnEnv(),
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     })

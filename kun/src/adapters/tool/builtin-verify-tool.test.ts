@@ -134,4 +134,20 @@ describe('createVerifyChangesLocalTool', () => {
     expect(executed).toEqual(['focused tests'])
     expect(result.output).toMatchObject({ status: 'failed' })
   })
+
+  it('treats "nothing to verify" as a benign skip, not a failure', async () => {
+    const root = await fixture()
+    const tool = createVerifyChangesLocalTool({
+      // Only a non-source doc changed, so no Vitest/typecheck command applies.
+      runCommand: async (command) => {
+        if (command.label === 'unstaged changes') return check(command, 0, 'README.md')
+        return check(command)
+      }
+    })
+
+    const result = await tool.execute({}, context(root))
+
+    expect(result.isError).not.toBe(true)
+    expect(result.output).toMatchObject({ status: 'skipped' })
+  })
 })

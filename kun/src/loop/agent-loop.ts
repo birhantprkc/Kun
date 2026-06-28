@@ -104,7 +104,6 @@ const MAX_PARALLEL_TOOL_CALLS = 3
 // N images"), bounding context growth for long computer-use sessions.
 const MAX_FORWARDED_TOOL_IMAGES = 3
 const MAX_TURN_MODEL_STEPS = 64
-const MAX_CONSECUTIVE_VERIFICATION_FAILURES = 3
 
 /**
  * Tools that, on their own, do not count as "progress" toward a goal when
@@ -287,87 +286,63 @@ export function resolvePlanModeToolSpecs(
     : toolSpecs.filter((tool) => tool.name === planTool)
 }
 
-export type AutomaticVerificationState = {
-  hasFileChanges: boolean
-  pending: boolean
-  exhausted: boolean
-  latestVerificationFailed: boolean
-  consecutiveFailures: number
+// Source files a `verify_changes` run can meaningfully validate (Vitest/tsc).
+// Documents and HTML written in write / design / SDD modes never match, so
+// those modes are never nudged to run code verification.
+const VERIFIABLE_SOURCE_PATH = /\.[cm]?[jt]sx?$/i
+
+function fileChangeResultPath(item: TurnItem): string | null {
+  if (item.kind !== 'tool_result') return null
+  const output = item.output
+  if (!output || typeof output !== 'object') return null
+  const record = output as Record<string, unknown>
+  const path = record.relative_path ?? record.path
+  return typeof path === 'string' ? path : null
 }
 
 /**
- * Determine whether the current turn changed files after its most recent
- * acceptance run. Only successful file-change results count, so a denied or
- * failed edit never triggers a pointless verification cycle.
+ * Whether this turn changed real source files (.ts/.js family) that a later
+ * `verify_changes` run has not yet covered. Only successful, non-plan
+ * file-change results with a source-code path count — so writing docs or HTML
+ * (write / design / SDD modes) never asks for code verification, and a denied
+ * or failed edit never does either. Used only to surface an optional nudge;
+ * verification is never forced.
  */
-export function automaticVerificationState(
+export function turnHasUnverifiedSourceChanges(
   items: readonly TurnItem[],
-  turnId: string,
-  maxFailures = MAX_CONSECUTIVE_VERIFICATION_FAILURES
-): AutomaticVerificationState {
-  let lastFileChangeIndex = -1
+  turnId: string
+): boolean {
+  let lastSourceChangeIndex = -1
   let lastVerificationIndex = -1
-  let latestVerificationFailed = false
-  let consecutiveFailures = 0
-
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index]
     if (!item || item.turnId !== turnId || item.kind !== 'tool_result') continue
+    if (item.toolName === VERIFY_CHANGES_TOOL_NAME) {
+      lastVerificationIndex = index
+      continue
+    }
     if (
       item.toolKind === 'file_change' &&
       item.toolName !== CREATE_PLAN_TOOL_NAME &&
       item.isError !== true
     ) {
-      lastFileChangeIndex = index
-      continue
+      const path = fileChangeResultPath(item)
+      if (path && VERIFIABLE_SOURCE_PATH.test(path)) lastSourceChangeIndex = index
     }
-    if (item.toolName !== VERIFY_CHANGES_TOOL_NAME) continue
-    lastVerificationIndex = index
-    latestVerificationFailed = item.isError === true
-    consecutiveFailures = latestVerificationFailed ? consecutiveFailures + 1 : 0
   }
-
-  const hasFileChanges = lastFileChangeIndex >= 0
-  const pending = hasFileChanges && lastFileChangeIndex > lastVerificationIndex
-  return {
-    hasFileChanges,
-    pending,
-    exhausted: pending && consecutiveFailures >= maxFailures,
-    latestVerificationFailed,
-    consecutiveFailures
-  }
+  return lastSourceChangeIndex >= 0 && lastSourceChangeIndex > lastVerificationIndex
 }
 
-function automaticVerificationInstruction(input: {
-  state: AutomaticVerificationState
-  toolAvailable: boolean
-}): string | null {
-  if (input.state.exhausted) {
-    return [
-      'Automatic acceptance reached its retry limit after repeated failures.',
-      'Do not claim verification passed. Report the remaining failure and its evidence in the final answer.'
-    ].join(' ')
-  }
-  if (input.state.pending && !input.toolAvailable) {
-    return [
-      'Files changed in this turn, but automatic command verification is unavailable under the current tool or sandbox policy.',
-      'Use an available validation path or state clearly that validation could not run.'
-    ].join(' ')
-  }
-  if (input.state.pending) {
-    return [
-      'Files changed in this turn and have not been verified yet.',
-      `Continue the implementation as needed, but call ${VERIFY_CHANGES_TOOL_NAME} before giving the final answer.`
-    ].join(' ')
-  }
-  if (input.state.latestVerificationFailed && !input.state.pending) {
-    return [
-      'The latest automatic acceptance check failed.',
-      'Inspect its exact output, fix the cause, and modify the affected files; verification will run again after the fix.',
-      'If it cannot be fixed, report the failing check and reason explicitly.'
-    ].join(' ')
-  }
-  return null
+/**
+ * A soft, optional nudge to run acceptance checks after source edits. The loop
+ * never forces `verify_changes` — the model decides whether validation applies.
+ */
+function verificationSuggestionInstruction(): string {
+  return [
+    'You changed source files in this turn.',
+    `If these are code changes, consider running \`${VERIFY_CHANGES_TOOL_NAME}\` to run the project's adjacent tests and typecheck before finishing.`,
+    'This is optional — skip it when verification does not apply.'
+  ].join(' ')
 }
 
 /**
@@ -793,7 +768,6 @@ export class AgentLoop {
   private readonly lastNoToolTextByTurn = new Map<string, string>()
   private readonly goalNoToolRecoveryStepsByTurn = new Map<string, number>()
   private readonly emptyPostToolRecoveryStepsByTurn = new Map<string, number>()
-  private readonly verificationRequiredByTurn = new Set<string>()
   private readonly turnFailures = new Map<string, TurnFailure>()
   /** Turns that executed at least one real (non-goal-status) tool call. */
   private readonly turnMadeProgress = new Set<string>()
@@ -956,7 +930,6 @@ export class AgentLoop {
       this.turnMadeProgress.delete(turnId)
       this.goalResumeSuppressedByTurn.delete(turnId)
       this.emptyPostToolRecoveryStepsByTurn.delete(turnId)
-      this.verificationRequiredByTurn.delete(turnId)
       this.turnFailures.delete(turnId)
       await this.runTurnEndHooks(threadId, turnId, finalStatus ?? 'failed', finalError)
     }
@@ -1546,26 +1519,16 @@ export class AgentLoop {
     const createPlanSatisfied = planTurnActive
       ? hasSuccessfulCreatePlanResult(historyItems, turnId)
       : false
-    const verificationState = automaticVerificationState(historyItems, turnId)
-    const verificationToolAvailable = toolSpecs.some(
-      (tool) => tool.name === VERIFY_CHANGES_TOOL_NAME
-    )
-    const planRequiredToolName =
+    const requiredToolName =
       planTurnActive &&
       !createPlanSatisfied &&
       toolSpecs.some((tool) => tool.name === CREATE_PLAN_TOOL_NAME)
         ? CREATE_PLAN_TOOL_NAME
         : undefined
-    const verificationRequiredToolName =
+    const suggestVerification =
       !planTurnActive &&
-      this.verificationRequiredByTurn.has(turnId) &&
-      verificationState.pending &&
-      !verificationState.exhausted &&
-      verificationToolAvailable
-        ? VERIFY_CHANGES_TOOL_NAME
-        : undefined
-    const requiredToolName = planRequiredToolName ?? verificationRequiredToolName
-    if (!verificationState.pending) this.verificationRequiredByTurn.delete(turnId)
+      toolSpecs.some((tool) => tool.name === VERIFY_CHANGES_TOOL_NAME) &&
+      turnHasUnverifiedSourceChanges(historyItems, turnId)
     const effectiveToolSpecs = resolvePlanModeToolSpecs(toolSpecs, {
       planTurnActive,
       createPlanSatisfied,
@@ -1591,10 +1554,6 @@ export class AgentLoop {
           nowIso: this.opts.nowIso()
         })
       : null
-    const verificationInstruction = automaticVerificationInstruction({
-      state: verificationState,
-      toolAvailable: verificationToolAvailable
-    })
     const contextInstructions = [
       ...(runtimeContextInstruction ? [runtimeContextInstruction] : []),
       ...(activeGoalInstruction ? [activeGoalInstruction] : []),
@@ -1616,7 +1575,7 @@ export class AgentLoop {
       ...skillResolution.instructions,
       ...(userInputDisabled ? [userInputUnavailableInstruction()] : []),
       ...(effectiveToolSpecs.some((tool) => tool.name === 'bash') ? [shellRuntimeInstruction()] : []),
-      ...(verificationInstruction ? [verificationInstruction] : []),
+      ...(suggestVerification ? [verificationSuggestionInstruction()] : []),
       ...(toolCatalogDriftMessage ? [toolCatalogDriftMessage] : [])
     ]
     await this.recordPipelineStage(threadId, turnId, 'input_remembered', {
@@ -1944,7 +1903,7 @@ export class AgentLoop {
           if (dispatched === 'all_suppressed') return 'stop'
           return 'continue'
         }
-        const message = `Model did not call the required \`${request.requiredToolName}\` tool for this turn.`
+        const message = `Model did not call the required \`${request.requiredToolName}\` tool for this GUI plan turn.`
         await this.opts.events.record({
           kind: 'error',
           threadId,
@@ -1964,19 +1923,17 @@ export class AgentLoop {
         )
         return 'failed'
       }
-      if (
-        stopReason === 'stop' &&
-        verificationState.pending &&
-        !verificationState.exhausted &&
-        verificationToolAvailable
-      ) {
-        this.verificationRequiredByTurn.add(turnId)
-        return 'continue'
-      }
+      const hasCurrentTurnFileChange = historyItems.some(
+        (item) =>
+          item.turnId === turnId &&
+          item.kind === 'tool_call' &&
+          item.toolKind === 'file_change' &&
+          item.toolName !== CREATE_PLAN_TOOL_NAME
+      )
       if (
         stopReason === 'stop' &&
         !textAccumulator.value.trim() &&
-        verificationState.hasFileChanges
+        hasCurrentTurnFileChange
       ) {
         const recoverySteps = (this.emptyPostToolRecoveryStepsByTurn.get(turnId) ?? 0) + 1
         if (recoverySteps <= EMPTY_POST_TOOL_MAX_RECOVERY_STEPS) {

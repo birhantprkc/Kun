@@ -1,11 +1,11 @@
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
-  automaticVerificationState,
   buildRuntimeContextInstruction,
   isStalePlanContext,
   resolvePlanModeToolSpecs,
-  shouldInjectInitialRuntimeContext
+  shouldInjectInitialRuntimeContext,
+  turnHasUnverifiedSourceChanges
 } from './agent-loop.js'
 import type { ModelToolSpec } from '../ports/model-client.js'
 
@@ -24,71 +24,64 @@ function result(input: {
   id: string
   toolName: string
   toolKind: 'file_change' | 'command_execution'
+  path?: string
+  turnId?: string
   isError?: boolean
 }) {
   return {
     id: input.id,
     threadId: 'thread_1',
-    turnId: 'turn_1',
+    turnId: input.turnId ?? 'turn_1',
     role: 'tool' as const,
     kind: 'tool_result' as const,
     toolName: input.toolName,
     callId: `call_${input.id}`,
     toolKind: input.toolKind,
-    output: {},
+    output: input.path ? { relative_path: input.path } : {},
     isError: input.isError ?? false,
     status: 'completed' as const,
     createdAt: '2000-01-02T03:04:05.000Z'
   }
 }
 
-describe('automaticVerificationState', () => {
-  it('requires verification after a successful file mutation', () => {
-    expect(automaticVerificationState([
-      result({ id: 'write', toolName: 'write', toolKind: 'file_change' })
-    ], 'turn_1')).toMatchObject({ hasFileChanges: true, pending: true, exhausted: false })
+describe('turnHasUnverifiedSourceChanges', () => {
+  it('flags an unverified source edit so the optional nudge can appear', () => {
+    expect(turnHasUnverifiedSourceChanges([
+      result({ id: 'write', toolName: 'write', toolKind: 'file_change', path: 'src/app.ts' })
+    ], 'turn_1')).toBe(true)
   })
 
-  it('does not trigger for a failed edit or create_plan artifact', () => {
-    const state = automaticVerificationState([
-      result({ id: 'failed', toolName: 'edit', toolKind: 'file_change', isError: true }),
-      result({ id: 'plan', toolName: 'create_plan', toolKind: 'file_change' })
-    ], 'turn_1')
-
-    expect(state.hasFileChanges).toBe(false)
-    expect(state.pending).toBe(false)
+  it('ignores non-source changes (docs/HTML written in write/design/SDD modes)', () => {
+    expect(turnHasUnverifiedSourceChanges([
+      result({ id: 'doc', toolName: 'write', toolKind: 'file_change', path: 'notes.md' }),
+      result({ id: 'page', toolName: 'write', toolKind: 'file_change', path: '.kun-design/a/v1.html' })
+    ], 'turn_1')).toBe(false)
   })
 
-  it('requires another run when a repair follows a failed verification', () => {
-    const state = automaticVerificationState([
-      result({ id: 'write', toolName: 'write', toolKind: 'file_change' }),
-      result({ id: 'verify_1', toolName: 'verify_changes', toolKind: 'command_execution', isError: true }),
-      result({ id: 'repair', toolName: 'edit', toolKind: 'file_change' })
-    ], 'turn_1')
-
-    expect(state).toMatchObject({ pending: true, latestVerificationFailed: true, consecutiveFailures: 1 })
+  it('ignores failed edits and create_plan artifacts', () => {
+    expect(turnHasUnverifiedSourceChanges([
+      result({ id: 'failed', toolName: 'edit', toolKind: 'file_change', path: 'src/a.ts', isError: true }),
+      result({ id: 'plan', toolName: 'create_plan', toolKind: 'file_change', path: 'plan.md' })
+    ], 'turn_1')).toBe(false)
   })
 
-  it('bounds repeated failed repair cycles and resets after a pass', () => {
-    const failedCycles = [1, 2, 3].flatMap((attempt) => [
-      result({ id: `edit_${attempt}`, toolName: 'edit', toolKind: 'file_change' }),
-      result({
-        id: `verify_${attempt}`,
-        toolName: 'verify_changes',
-        toolKind: 'command_execution',
-        isError: true
-      })
-    ])
-    expect(automaticVerificationState([
-      ...failedCycles,
-      result({ id: 'last_repair', toolName: 'edit', toolKind: 'file_change' })
-    ], 'turn_1')).toMatchObject({ pending: true, exhausted: true, consecutiveFailures: 3 })
+  it('clears after a verify_changes run and re-arms on the next source edit', () => {
+    expect(turnHasUnverifiedSourceChanges([
+      result({ id: 'write', toolName: 'write', toolKind: 'file_change', path: 'src/a.ts' }),
+      result({ id: 'verify', toolName: 'verify_changes', toolKind: 'command_execution' })
+    ], 'turn_1')).toBe(false)
 
-    expect(automaticVerificationState([
-      ...failedCycles,
-      result({ id: 'pass', toolName: 'verify_changes', toolKind: 'command_execution' }),
-      result({ id: 'next_edit', toolName: 'edit', toolKind: 'file_change' })
-    ], 'turn_1')).toMatchObject({ pending: true, exhausted: false, consecutiveFailures: 0 })
+    expect(turnHasUnverifiedSourceChanges([
+      result({ id: 'write', toolName: 'write', toolKind: 'file_change', path: 'src/a.ts' }),
+      result({ id: 'verify', toolName: 'verify_changes', toolKind: 'command_execution' }),
+      result({ id: 'repair', toolName: 'edit', toolKind: 'file_change', path: 'src/a.ts' })
+    ], 'turn_1')).toBe(true)
+  })
+
+  it('ignores changes from other turns', () => {
+    expect(turnHasUnverifiedSourceChanges([
+      result({ id: 'other', toolName: 'write', toolKind: 'file_change', path: 'src/a.ts', turnId: 'turn_2' })
+    ], 'turn_1')).toBe(false)
   })
 })
 
