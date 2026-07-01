@@ -4,6 +4,7 @@ import type {
   CoreAttachmentTextFallbackJson,
   CoreMemoryDiagnosticsJson,
   CoreMemoryRecordJson,
+  CoreMcpOAuthDiagnosticJson,
   CoreRuntimeInfoJson,
   CoreRuntimeSkillJson,
   CoreRuntimeToolDiagnosticsJson
@@ -500,6 +501,9 @@ export interface AgentProvider {
   ): Promise<{ turnId: string; threadId: string; userMessageItemId?: string; reviewItemId?: string }>
   getRuntimeInfo?(): Promise<CoreRuntimeInfoJson>
   getToolDiagnostics?(): Promise<CoreRuntimeToolDiagnosticsJson>
+  getMcpOAuthDiagnostics?(): Promise<CoreMcpOAuthDiagnosticJson[]>
+  clearMcpOAuthCredentials?(serverId?: string): Promise<string[]>
+  authorizeMcpOAuthCredentials?(serverId: string): Promise<import('./kun-contract').CoreMcpOAuthAuthorizeResponseJson>
   listSkills?(): Promise<CoreRuntimeSkillJson[]>
   uploadAttachment?(input: {
     name: string

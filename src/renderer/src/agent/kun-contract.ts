@@ -281,6 +281,7 @@ export type CoreRuntimeInfoJson = {
 export type CoreRuntimeToolDiagnosticsJson = {
   providers?: Array<Record<string, unknown>>
   mcpServers?: Array<Record<string, unknown>>
+  mcpOAuth?: CoreMcpOAuthDiagnosticJson[]
   mcpSearch?: {
     enabled?: boolean
     mode?: 'direct' | 'search' | 'auto'
@@ -310,6 +311,38 @@ export type CoreRuntimeToolDiagnosticsJson = {
     active?: number
     childRuns?: Array<Record<string, unknown>>
   }
+}
+
+export type CoreMcpOAuthDiagnosticJson = {
+  serverId: string
+  enabled: boolean
+  configured: boolean
+  transport: string
+  url?: string
+  status: 'disabled' | 'empty' | 'partial' | 'authorized' | 'expired' | 'error'
+  hasClientInformation: boolean
+  hasTokens: boolean
+  hasRefreshToken: boolean
+  hasCodeVerifier: boolean
+  hasDiscoveryState: boolean
+  grantedScopes?: string[]
+  expiresAt?: string
+  lastError?: string
+  lastErrorAt?: string
+}
+
+export type CoreMcpOAuthDiagnosticsResponseJson = {
+  servers: CoreMcpOAuthDiagnosticJson[]
+}
+
+export type CoreMcpOAuthClearResponseJson = {
+  cleared: string[]
+}
+
+export type CoreMcpOAuthAuthorizeResponseJson = {
+  serverId: string
+  status: CoreMcpOAuthDiagnosticJson['status']
+  authorized: boolean
 }
 
 export type CoreRuntimeSkillJson = {
