@@ -14,6 +14,7 @@ import {
   workspaceDirectoryTargetPayloadSchema,
   workspaceEntryDeletePayloadSchema,
   workspaceEntryRenamePayloadSchema,
+  workspaceImagePickPayloadSchema,
   writeExportPayloadSchema,
   writeRichClipboardPayloadSchema,
   writeInlineCompletionPayloadSchema
@@ -226,6 +227,11 @@ describe('app-ipc-schemas', () => {
           ]
         }
       },
+      design: {
+        brandColor: '#3b82d8',
+        tone: ['专业', '科技感'],
+        designSystemPreset: 'shadcn'
+      },
       disabledSkillIds: ['test-skill-08']
     })
 
@@ -237,6 +243,8 @@ describe('app-ipc-schemas', () => {
     expect(payload.write?.inlineCompletion?.model).toBe('deepseek-v4-pro')
     expect(payload.write?.selectionAssist?.infographicPrompt).toBe('手绘风格信息图。')
     expect(payload.write?.selectionAssist?.quickActions).toHaveLength(2)
+    expect(payload.design?.brandColor).toBe('#3b82d8')
+    expect(payload.design?.designSystemPreset).toBe('shadcn')
     expect(payload.disabledSkillIds).toEqual(['test-skill-08'])
   })
 
@@ -798,5 +806,33 @@ describe('app-ipc-schemas', () => {
 
     expect(payload.path).toBe('/tmp/workspace/draft.md')
     expect(payload.content).toBe('# Draft')
+  })
+
+  it('accepts workspace image pick payloads and rejects extra fields', () => {
+    const payload = workspaceImagePickPayloadSchema.parse({
+      workspaceRoot: '/tmp/workspace',
+      currentFilePath: '/tmp/workspace/.kun-design/abc/v1.html',
+      imageDirectory: 'img'
+    })
+    expect(payload.workspaceRoot).toBe('/tmp/workspace')
+    expect(payload.currentFilePath).toBe('/tmp/workspace/.kun-design/abc/v1.html')
+    expect(payload.imageDirectory).toBe('img')
+    expect(
+      workspaceImagePickPayloadSchema.parse({
+        workspaceRoot: '/tmp/workspace',
+        imageDirectory: 'img'
+      })
+    ).toEqual({
+      workspaceRoot: '/tmp/workspace',
+      imageDirectory: 'img'
+    })
+    // .strict() must reject unknown keys so settings sync can't be poisoned.
+    expect(() =>
+      workspaceImagePickPayloadSchema.parse({
+        workspaceRoot: '/tmp/workspace',
+        currentFilePath: '/tmp/workspace/v1.html',
+        somethingExtra: 'nope'
+      })
+    ).toThrow()
   })
 })

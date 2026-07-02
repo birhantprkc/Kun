@@ -402,12 +402,27 @@ function normalizeGeneratedFileReference(entry: unknown): GeneratedFileReference
   return Object.keys(normalized).length > 0 ? normalized : null
 }
 
+const GENERATED_FILE_TOOL_NAMES = new Set([
+  'generate_image',
+  'generate_speech',
+  'generate_music',
+  'generate_video'
+])
+
+function isGeneratedFileToolName(toolName: string | undefined): boolean {
+  const name = toolName?.trim()
+  if (!name) return false
+  if (GENERATED_FILE_TOOL_NAMES.has(name)) return true
+  const bridgedName = name.split('__').at(-1)
+  return Boolean(bridgedName && GENERATED_FILE_TOOL_NAMES.has(bridgedName))
+}
+
 function extractToolGeneratedFiles(item: CoreTurnItemJson): GeneratedFileReference[] | undefined {
   if (item.kind !== 'tool_result') return undefined
   const payload = payloadFor(item)
   const candidates = [
-    ...(Array.isArray(payload.files) ? payload.files : []),
-    ...(Array.isArray(payload.generatedFiles) ? payload.generatedFiles : [])
+    ...(Array.isArray(payload.generatedFiles) ? payload.generatedFiles : []),
+    ...(isGeneratedFileToolName(item.toolName) && Array.isArray(payload.files) ? payload.files : [])
   ]
   const generatedFiles: GeneratedFileReference[] = []
   const seen = new Set<string>()
@@ -531,6 +546,7 @@ function toolBlockFromItem(item: CoreTurnItemJson, child?: CoreChildRuntimeMetad
     (item.kind === 'tool_result' ? 'tool result' : 'tool')
   const meta: Record<string, unknown> = {
     sourceItemId: item.id,
+    sourceItemKind: item.kind,
     ...(item.callId ? { callId: item.callId } : {}),
     ...(item.toolName ? { toolName: item.toolName } : {})
   }

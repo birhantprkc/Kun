@@ -11,6 +11,7 @@ import {
   mergeKunRuntimeSettings,
   mergeAppBehaviorSettings,
   mergeClawSettings,
+  mergeDesignSettings,
   mergeModelProviderSettings,
   mergeScheduleSettings,
   mergeWorkflowSettings,
@@ -18,6 +19,7 @@ import {
   mergeTerminalSettings,
   normalizeAppBehaviorSettings,
   normalizeClawSettings,
+  normalizeDesignSettings,
   normalizeCheckpointCleanupSettings,
   normalizeCursorSpotlightColor,
   normalizeGuiUpdateChannel,
@@ -87,6 +89,7 @@ export function mergeSettings(current: AppSettingsV1, patch: SettingsPatch): App
     claw: mergeClawSettings(safeCurrent.claw, patch.claw),
     schedule: mergeScheduleSettings(safeCurrent.schedule, patch.schedule),
     workflow: mergeWorkflowSettings(safeCurrent.workflow, patch.workflow),
+    design: mergeDesignSettings(safeCurrent.design, patch.design),
     terminal: mergeTerminalSettings(safeCurrent.terminal, patch.terminal),
     guiUpdate: {
       ...safeCurrent.guiUpdate,
@@ -140,6 +143,7 @@ export function coerceRendererSettings(settings: AppSettingsV1): AppSettingsV1 {
     claw: normalizeClawSettings(raw.claw),
     schedule: normalizeScheduleSettings(raw.schedule),
     workflow: normalizeWorkflowSettings(raw.workflow),
+    design: normalizeDesignSettings(raw.design),
     terminal: normalizeTerminalSettings(raw.terminal),
     guiUpdate: {
       channel: normalizeGuiUpdateChannel(raw.guiUpdate?.channel ?? DEFAULT_GUI_UPDATE_CHANNEL)

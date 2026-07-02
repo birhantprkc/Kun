@@ -7,10 +7,14 @@ import { CapabilityRegistry } from '../src/adapters/tool/capability-registry.js'
 import { LocalToolHost } from '../src/adapters/tool/local-tool-host.js'
 import {
   buildImageGenToolProviders,
+  CodexResponsesImageClient,
+  codexResponsesImageUrl,
+  createImageGenClient,
   mapImageSize,
   MiniMaxImageClient,
   minimaxImageDimensionFields,
   openAiCompatImageUrl,
+  protocolSupportsImageEdit,
   type ImageGenClient
 } from '../src/adapters/tool/image-gen-tool-provider.js'
 import { FileAttachmentStore } from '../src/attachments/attachment-store.js'
@@ -208,6 +212,71 @@ describe('Image gen tool provider', () => {
       .toBe('https://x.test/v1/images/edits')
   })
 
+  it('posts Codex subscription image requests through responses image_generation SSE', async () => {
+    expect(codexResponsesImageUrl('https://chatgpt.com/backend-api/codex'))
+      .toBe('https://chatgpt.com/backend-api/codex/responses')
+    expect(codexResponsesImageUrl('https://chatgpt.com/backend-api/codex/responses'))
+      .toBe('https://chatgpt.com/backend-api/codex/responses')
+    expect(createImageGenClient({
+      protocol: 'codex-responses-image',
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      apiKey: 'codex-access'
+    }).id).toBe('codex-responses-image')
+
+    const requests: Array<{ url: string; headers: Record<string, string>; body: string }> = []
+    const resultBase64 = png(8, 8).toString('base64')
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL, init?: RequestInit) => {
+      requests.push({
+        url: String(url),
+        headers: init?.headers as Record<string, string>,
+        body: String(init?.body)
+      })
+      return new Response([
+        `data: ${JSON.stringify({
+          type: 'response.output_item.done',
+          item: { type: 'image_generation_call', result: resultBase64 }
+        })}`,
+        'data: [DONE]'
+      ].join('\n\n'), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' }
+      })
+    }))
+    const client = new CodexResponsesImageClient('https://chatgpt.com/backend-api/codex', 'codex-access', {
+      'ChatGPT-Account-Id': 'acct_123',
+      originator: 'codex_cli_rs'
+    })
+
+    const image = await client.generate({
+      prompt: 'tiny square',
+      model: 'gpt-image-2',
+      size: '1024x1024',
+      timeoutMs: 1_000,
+      signal: new AbortController().signal
+    })
+
+    expect(image).toMatchObject({ mimeType: 'image/png' })
+    expect(image.data.byteLength).toBeGreaterThan(0)
+    expect(requests).toHaveLength(1)
+    expect(requests[0].url).toBe('https://chatgpt.com/backend-api/codex/responses')
+    expect(requests[0].headers).toMatchObject({
+      Authorization: 'Bearer codex-access',
+      Accept: 'text/event-stream',
+      'Content-Type': 'application/json',
+      'ChatGPT-Account-Id': 'acct_123',
+      originator: 'codex_cli_rs'
+    })
+    expect(JSON.parse(requests[0].body)).toMatchObject({
+      model: 'gpt-5.5',
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'tiny square' }] }],
+      instructions: 'You are an image generation assistant.',
+      tools: [{ type: 'image_generation', model: 'gpt-image-2', size: '1024x1024' }],
+      tool_choice: { type: 'image_generation' },
+      stream: true,
+      store: false
+    })
+  })
+
   it('generates an image, saves it to the workspace, and scopes the attachment', async () => {
     const client = fakeClient()
     const store = attachmentStore(join(workspace, 'attachments'))
@@ -350,6 +419,49 @@ describe('Image gen tool provider', () => {
     }, buildContext())
     expect(multi.item).toMatchObject({ kind: 'tool_result', isError: false })
     expect(captured[1].body.getAll('image[]')).toHaveLength(2)
+  })
+
+  it('allowlists only real-edit protocols in protocolSupportsImageEdit', () => {
+    expect(protocolSupportsImageEdit('openai-images')).toBe(true)
+    expect(protocolSupportsImageEdit(undefined)).toBe(true)
+    expect(protocolSupportsImageEdit('minimax-image')).toBe(false)
+    expect(protocolSupportsImageEdit('codex-responses-image')).toBe(false)
+  })
+
+  it('returns edits_unsupported BEFORE any network call when references are passed on a non-edit protocol (MiniMax)', async () => {
+    await writeFile(join(workspace, 'ref.png'), png(16, 16))
+    const client = fakeClient()
+    const host = new LocalToolHost({
+      registry: new CapabilityRegistry(
+        buildImageGenToolProviders(imageGenConfig({ protocol: 'minimax-image' }), { client }).providers
+      )
+    })
+    const result = await host.execute({
+      callId: 'call_edit',
+      toolName: 'generate_image',
+      arguments: { prompt: 'restyle this', reference_image_paths: ['ref.png'] }
+    }, buildContext())
+    expect(result.item).toMatchObject({ kind: 'tool_result', isError: true })
+    if (result.item.kind === 'tool_result') {
+      expect((result.item.output as { error?: { code?: string } }).error?.code).toBe('edits_unsupported')
+    }
+    expect(client.editCalls).toHaveLength(0) // never reached the provider
+  })
+
+  it('does not advertise image-to-image (reference_image_paths) on a non-edit protocol', async () => {
+    const minimaxTools = await new LocalToolHost({
+      registry: new CapabilityRegistry(buildImageGenToolProviders(imageGenConfig({ protocol: 'minimax-image' })).providers)
+    }).listTools(buildContext())
+    const minimaxTool = minimaxTools.find((tool) => tool.name === 'generate_image')!
+    expect(minimaxTool.description).not.toContain('image-to-image')
+    expect((minimaxTool.inputSchema.properties as Record<string, unknown>)).not.toHaveProperty('reference_image_paths')
+
+    const openaiTools = await new LocalToolHost({
+      registry: new CapabilityRegistry(buildImageGenToolProviders(imageGenConfig()).providers)
+    }).listTools(buildContext())
+    const openaiTool = openaiTools.find((tool) => tool.name === 'generate_image')!
+    expect(openaiTool.description).toContain('image-to-image')
+    expect((openaiTool.inputSchema.properties as Record<string, unknown>)).toHaveProperty('reference_image_paths')
   })
 
   it('rejects reference paths that escape the workspace or are not images', async () => {

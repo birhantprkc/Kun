@@ -791,6 +791,22 @@ function resolveProviderCapabilityModel(configuredModel: string, providerModels:
     : providerModels[0] ?? model
 }
 
+function resolveImageProviderCapabilityModel(
+  configuredModel: string,
+  image: ModelProviderImageCapabilityV1
+): string {
+  const fallback =
+    image.protocol === 'codex-responses-image' && image.models.includes('gpt-image-2')
+      ? 'gpt-image-2'
+      : image.models[0] ?? ''
+  const model = configuredModel.trim()
+  if (!model) return fallback
+  if (image.models.length === 0) return model
+  return image.models.some((providerModel) => providerModel.trim().toLowerCase() === model.toLowerCase())
+    ? model
+    : fallback || model
+}
+
 function tokenPlanPresetForProvider(provider: Pick<ModelProviderProfileV1, 'id'>) {
   if (!provider.id.endsWith(TOKEN_PLAN_PROVIDER_ID_SUFFIX)) return null
   const preset = getModelProviderPreset(provider.id.slice(0, -TOKEN_PLAN_PROVIDER_ID_SUFFIX.length))
@@ -833,7 +849,7 @@ export function resolveKunImageGenerationSettings(settings: AppSettingsV1): KunI
     protocol: image.protocol,
     baseUrl: resolveProviderCapabilityBaseUrl(provider, image, 'image'),
     apiKey: provider.apiKey.trim(),
-    model: resolveProviderCapabilityModel(imageGeneration.model, image.models)
+    model: resolveImageProviderCapabilityModel(imageGeneration.model, image)
   }
 }
 
@@ -1130,7 +1146,9 @@ function normalizeModelProviderImageCapability(
 }
 
 export function normalizeImageGenerationProtocol(value: unknown): ImageGenerationProtocol {
-  return value === 'minimax-image' ? 'minimax-image' : DEFAULT_IMAGE_GENERATION_PROTOCOL
+  if (value === 'minimax-image') return 'minimax-image'
+  if (value === 'codex-responses-image') return 'codex-responses-image'
+  return DEFAULT_IMAGE_GENERATION_PROTOCOL
 }
 
 function normalizeModelProviderSpeechCapability(

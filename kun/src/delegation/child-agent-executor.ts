@@ -205,6 +205,7 @@ export function createChildAgentExecutor(options: ChildAgentExecutorOptions): Ch
         model,
         mode: 'agent',
         reasoningEffort: normalizeRoleReasoningEffort(input.reasoningEffort),
+        ...(input.guiDesignCanvas ? { guiDesignCanvas: true } : {}),
         // Children have no GUI surface to answer structured input prompts.
         disableUserInput: true
       }

@@ -78,6 +78,7 @@ export class TurnService {
       reasoningEffort: input.request.reasoningEffort,
       attachmentIds: input.request.attachmentIds ?? [],
       guiPlan: input.request.guiPlan,
+      guiDesignCanvas: input.request.guiDesignCanvas,
       mode: input.request.mode,
       disableUserInput: input.request.disableUserInput,
       workspaceCheckpointId: input.request.workspaceCheckpointId

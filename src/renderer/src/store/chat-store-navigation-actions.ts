@@ -68,6 +68,16 @@ import {
   writeWorkspaceForThreadId
 } from '../write/write-thread-registry'
 import {
+  DESIGN_ASSISTANT_THREAD_TITLE,
+  activeDesignThreadForWorkspace,
+  designDocKey,
+  isDesignThreadId,
+  markDesignThread,
+  readDesignThreadRegistry,
+  saveDesignThreadRegistry
+} from '../design/design-thread-registry'
+import { persistDesignChatMetaForDoc } from '../design/design-chat-transcript'
+import {
   isSddAssistantThread,
   readSddThreadRegistry
 } from '../sdd/sdd-thread-registry'
@@ -114,7 +124,7 @@ let trayActionUnsubscribe: (() => void) | null = null
 
 export function createNavigationActions(
   { set, get, sseAbortRef }: StoreActionContext
-): Pick<ChatState, 'openCode' | 'openWrite' | 'ensureWriteThreadForWorkspace' | 'createWriteThread' | 'selectWriteThread' | 'probeRuntime' | 'boot' | 'chooseWorkspace' | 'selectWorkspaceRoot' | 'clearWorkspace' | 'deleteWorkspace' | 'refreshThreads' | 'setThreadSearch' | 'setShowArchivedThreads'> {
+): Pick<ChatState, 'openCode' | 'openWrite' | 'openDesign' | 'ensureWriteThreadForWorkspace' | 'createWriteThread' | 'selectWriteThread' | 'ensureDesignThreadForWorkspace' | 'createDesignThread' | 'probeRuntime' | 'boot' | 'chooseWorkspace' | 'selectWorkspaceRoot' | 'clearWorkspace' | 'deleteWorkspace' | 'refreshThreads' | 'setThreadSearch' | 'setShowArchivedThreads'> {
   return {
   openCode: async () => {
     const state = get()
@@ -149,6 +159,29 @@ export function createNavigationActions(
     set({
       ...clearedThreadSelection(),
       route: 'chat',
+      watchTurnCompletion: nextWatch
+    })
+    syncTurnCompletionPoll(set, get)
+  },
+
+  openDesign: () => {
+    const state = get()
+    if (isDesignThreadId(state.activeThreadId)) {
+      set({ route: 'design' })
+      return
+    }
+
+    const nextWatch = { ...state.watchTurnCompletion }
+    if (state.activeThreadId && state.busy) {
+      nextWatch[state.activeThreadId] = true
+      watchTurnCompletionNotification(state.activeThreadId)
+    }
+    sseAbortRef.current?.abort()
+    sseAbortRef.current = null
+    clearBusyWatchdog()
+    set({
+      ...clearedThreadSelection(),
+      route: 'design',
       watchTurnCompletion: nextWatch
     })
     syncTurnCompletionPoll(set, get)
@@ -290,6 +323,84 @@ export function createNavigationActions(
     }
     set({ route: 'write' })
     await get().selectThread(targetId)
+  },
+
+  ensureDesignThreadForWorkspace: async (workspaceRoot, docId) => {
+    const state = get()
+    const targetWorkspace =
+      normalizeWorkspaceRoot(workspaceRoot) || normalizeWorkspaceRoot(state.workspaceRoot)
+    if (!targetWorkspace) {
+      set({ error: i18n.t('common:workspaceRequiredToCreateThread') })
+      return null
+    }
+    if (state.runtimeConnection !== 'ready') {
+      set({ error: i18n.t('common:runtimeActionNeedsConnection') })
+      return null
+    }
+    const targetDoc = (docId ?? '').trim()
+    const registry = readDesignThreadRegistry()
+    const record = registry.workspaces[designDocKey(targetWorkspace, targetDoc)]
+    const activeThread = state.activeThreadId
+      ? state.threads.find((thread) => thread.id === state.activeThreadId) ?? null
+      : null
+    // Reuse the active thread only when it is THIS 设计稿's registered thread (a
+    // thread id belongs to exactly one (workspace, 设计稿) scope).
+    if (activeThread && record && record.threadIds.includes(activeThread.id)) {
+      set({ route: 'design', error: null })
+      return activeThread.id
+    }
+    const existing = activeDesignThreadForWorkspace(targetWorkspace, targetDoc, state.threads, registry)
+    if (existing) {
+      set({ route: 'design' })
+      await get().selectThread(existing.id)
+      return existing.id
+    }
+    return get().createDesignThread(targetWorkspace, targetDoc)
+  },
+
+  createDesignThread: async (workspaceRoot, docId) => {
+    const targetWorkspace =
+      normalizeWorkspaceRoot(workspaceRoot) || normalizeWorkspaceRoot(get().workspaceRoot)
+    if (!targetWorkspace) {
+      set({ error: i18n.t('common:workspaceRequiredToCreateThread') })
+      return null
+    }
+    if (get().runtimeConnection !== 'ready') {
+      set({ error: i18n.t('common:runtimeActionNeedsConnection') })
+      return null
+    }
+    const targetDoc = (docId ?? '').trim()
+    try {
+      const provider = getProvider()
+      const thread = await provider.createThread({
+        workspace: targetWorkspace,
+        title: DESIGN_ASSISTANT_THREAD_TITLE,
+        mode: 'agent'
+      })
+      const nextRegistry = markDesignThread(targetWorkspace, targetDoc, thread.id)
+      saveDesignThreadRegistry(nextRegistry)
+      void persistDesignChatMetaForDoc({
+        workspaceRoot: targetWorkspace,
+        docId: targetDoc,
+        stampThreadId: thread.id
+      }).catch(() => undefined)
+      set((s) => ({
+        route: 'design',
+        threads: s.threads.some((item) => item.id === thread.id) ? s.threads : [thread, ...s.threads],
+        error: null
+      }))
+      await get().refreshThreads()
+      await get().selectThread(thread.id)
+      return thread.id
+    } catch (e) {
+      set({
+        error: formatRuntimeError(e),
+        ...(shouldOpenSettingsForError(e)
+          ? { route: 'settings' as const, settingsSection: 'agents' as const }
+          : {})
+      })
+      return null
+    }
   },
 
   probeRuntime: async (mode = 'user', options) => {
@@ -786,7 +897,8 @@ export function createNavigationActions(
         get().route === 'chat' &&
         activeThread != null &&
         (isWriteThreadId(activeThread.id, writeRegistry) ||
-          isClawThread(activeThread, get().clawChannels))
+          isClawThread(activeThread, get().clawChannels) ||
+          isDesignThreadId(activeThread.id))
       const shouldClearSelection =
         activeThreadId != null && !displayThreads.some((thread) => thread.id === activeThreadId)
       if (shouldClearSelection) {

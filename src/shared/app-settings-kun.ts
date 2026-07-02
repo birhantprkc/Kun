@@ -298,7 +298,7 @@ export function defaultKunContextCompactionSettings(): KunContextCompactionSetti
 
 export function defaultKunRuntimeTuningSettings(): KunRuntimeTuningSettingsV1 {
   return {
-    streamIdleTimeoutMs: 45_000,
+    streamIdleTimeoutMs: 450_000,
     toolStorm: {
       enabled: true,
       windowSize: 8,
@@ -557,7 +557,9 @@ function normalizeKunImageGenerationSettings(
 }
 
 function normalizeKunImageGenerationProtocol(value: unknown): ImageGenerationProtocol {
-  return value === 'minimax-image' ? 'minimax-image' : DEFAULT_IMAGE_GENERATION_PROTOCOL
+  if (value === 'minimax-image') return 'minimax-image'
+  if (value === 'codex-responses-image') return 'codex-responses-image'
+  return DEFAULT_IMAGE_GENERATION_PROTOCOL
 }
 
 function normalizeKunSpeechToTextSettings(

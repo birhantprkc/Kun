@@ -23,6 +23,7 @@ import {
   buildKunServeArgs,
   resolveKunExecutable
 } from './resolve-kun-binary'
+import { resolveCodexOAuthApiKey } from './codex-auth'
 import {
   KunConfigSchema,
   KunServeConfigSchema,
@@ -381,6 +382,10 @@ async function startKunChildOnce(
   // when the user actually opted into host control.
   const runAsElectron = process.platform === 'darwin' && runtime.computerUse?.enabled === true
   const command = runAsElectron ? resolution.command : resolveNodeScriptCommand(resolution.command)
+  // When the active provider is Codex, runtime.apiKey holds JSON-encoded OAuth
+  // credentials; unwrap to the bare access token so the default client sends a
+  // valid Bearer (the Codex headers are written to serve.headers in config).
+  const defaultClientApiKey = resolveCodexOAuthApiKey(runtime.apiKey).apiKey
   // When the runtime's own (default) provider is the Claude subscription, tell
   // the runtime so its dispatch routes default-provider turns (thread.providerId
   // absent or equal to it) to the embedded SDK instead of the HTTP default.
@@ -394,7 +399,7 @@ async function startKunChildOnce(
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
     KUN_RUNTIME_TOKEN: runtime.runtimeToken,
-    DEEPSEEK_API_KEY: runtime.apiKey || process.env.DEEPSEEK_API_KEY || '',
+    DEEPSEEK_API_KEY: defaultClientApiKey || process.env.DEEPSEEK_API_KEY || '',
     ...(activeProviderKind === 'agent-sdk' ? { KUN_RUNTIME_PROVIDER_KIND: 'agent-sdk' } : {}),
     ...(claudeBinary ? { KUN_CLAUDE_BINARY: claudeBinary } : {})
   }
@@ -458,6 +463,7 @@ export async function syncGuiManagedKunConfig(
   dataDir: string,
   runtime: Pick<
     KunRuntimeSettingsV1,
+    | 'apiKey'
     | 'mcpSearch'
     | 'tokenEconomy'
     | 'storage'
@@ -528,11 +534,17 @@ export async function syncGuiManagedKunConfig(
   const providers = options?.scheduleMcp?.settings
     ? providersConfigForRuntime(options.scheduleMcp.settings)
     : undefined
+  // When the active provider is Codex, emit its required headers as the default
+  // client's serve.headers (the bare access token goes to DEEPSEEK_API_KEY).
+  // Always set the key explicitly (undefined clears it) so switching away from
+  // Codex doesn't leave stale headers carried over by the `...serve` spread.
+  const defaultClientHeaders = resolveCodexOAuthApiKey(runtime.apiKey).headers
   const next = {
     serve: {
       ...serve,
       storage,
       tokenEconomy: tokenEconomyConfigForRuntime(runtime.tokenEconomy, existingTokenEconomy),
+      headers: defaultClientHeaders,
       ...(providers && Object.keys(providers).length ? { providers } : {})
     },
     models: modelConfigForRuntime(existingModels, runtime.modelProfiles),
@@ -875,17 +887,23 @@ function providersConfigForRuntime(settings: AppSettingsV1): Record<string, Reco
     if (!id) continue
     // agent-sdk providers carry no usable HTTP endpoint; everyone else needs one.
     if (!baseUrl && !isAgentSdk) continue
-    // The runtime's own provider is already wired via the default CLI args, so
-    // we normally skip it here — EXCEPT agent-sdk: its turns must be routable to
-    // the embedded SDK via `serve.providers`, otherwise they fall back to the
-    // HTTP default client and 401 on api.anthropic.com (invalid x-api-key).
+    // The runtime's own provider is already wired via the default client
+    // (DEEPSEEK_API_KEY + serve.headers); we normally skip it here — EXCEPT
+    // agent-sdk: its turns must be routable to the embedded SDK via
+    // `serve.providers`, otherwise they fall back to the HTTP default client and
+    // 401 on api.anthropic.com (invalid x-api-key).
     if (id === runtimeProviderId && !isAgentSdk) continue
+    const rawApiKey = provider.apiKey?.trim() ?? ''
+    // Codex stores JSON OAuth creds in apiKey; unwrap to the bare token + the
+    // headers the backend requires. Plain keys (and agent-sdk tokens) pass through.
+    const resolved = resolveCodexOAuthApiKey(rawApiKey)
     out[id] = {
-      apiKey: provider.apiKey?.trim() ?? '',
+      apiKey: resolved.apiKey,
       ...(baseUrl ? { baseUrl } : {}),
       ...(provider.kind ? { kind: provider.kind } : {}),
       ...(provider.endpointFormat ? { endpointFormat: provider.endpointFormat } : {}),
-      ...(proxyUrl ? { modelProxyUrl: proxyUrl } : {})
+      ...(proxyUrl ? { modelProxyUrl: proxyUrl } : {}),
+      ...(resolved.headers ? { headers: resolved.headers } : {})
     }
   }
   return out
@@ -1020,10 +1038,11 @@ function imageGenConfigForRuntime(
     enabled: imageGeneration.enabled,
     timeoutMs: imageGeneration.timeoutMs
   }
+  const resolvedApiKey = resolveCodexOAuthApiKey(imageGeneration.apiKey)
   const fields = {
     protocol: imageGeneration.protocol,
     baseUrl: imageGeneration.baseUrl,
-    apiKey: imageGeneration.apiKey,
+    apiKey: resolvedApiKey.apiKey,
     model: imageGeneration.model,
     defaultSize: imageGeneration.defaultSize
   }
@@ -1032,6 +1051,8 @@ function imageGenConfigForRuntime(
     if (trimmed) next[key] = trimmed
     else delete next[key]
   }
+  if (resolvedApiKey.headers) next.headers = resolvedApiKey.headers
+  else delete next.headers
   return next
 }
 

@@ -876,16 +876,15 @@ function MediaAttachmentGallery({
 
 export function GeneratedFilesPanel({ blocks }: { blocks: ToolBlock[] }): ReactElement | null {
   const { t } = useTranslation('common')
-  const media = useMemo(
-    () =>
-      blocks.flatMap((block) =>
-        mergeMediaReferences(
-          metaAttachmentReferences(block.meta as RuntimeDisclosureMetadata | undefined),
-          metaGeneratedFileReferences(block.meta)
-        )
-      ),
-    [blocks]
-  )
+  const media = useMemo(() => {
+    const attachments: AttachmentReference[] = []
+    const generatedFiles: GeneratedFileReference[] = []
+    for (const block of blocks) {
+      attachments.push(...metaAttachmentReferences(block.meta as RuntimeDisclosureMetadata | undefined))
+      generatedFiles.push(...metaGeneratedFileReferences(block.meta))
+    }
+    return mergeMediaReferences(attachments, generatedFiles)
+  }, [blocks])
 
   if (media.length === 0) return null
 

@@ -7,6 +7,7 @@ import { configureLogger } from './logger'
 import {
   defaultClawSettings,
   DEFAULT_LOG_RETENTION_DAYS,
+  defaultDesignSettings,
   defaultKeyboardShortcuts,
   defaultKunRuntimeSettings,
   defaultModelProviderSettings,
@@ -55,6 +56,7 @@ function createSettings(binaryPath: string): AppSettingsV1 {
     claw: defaultClawSettings(),
     schedule: defaultScheduleSettings(),
     workflow: defaultWorkflowSettings(),
+    design: defaultDesignSettings(),
     terminal: defaultTerminalSettings(),
     guiUpdate: { channel: 'stable' },
     codePromptPrefix: '',
@@ -556,7 +558,7 @@ describe('syncGuiManagedKunConfig', () => {
         hardThreshold: 990_000
       }
     })
-    expect(parsed.runtime.streamIdleTimeoutMs).toBe(45000)
+    expect(parsed.runtime.streamIdleTimeoutMs).toBe(450000)
     expect(parsed.runtime.toolStorm).toMatchObject({ enabled: true, windowSize: 8, threshold: 3 })
     expect(parsed.runtime.toolArgumentRepair).toMatchObject({ maxStringBytes: 524288 })
     expect(parsed.capabilities.attachments).toMatchObject({ enabled: true })
@@ -673,6 +675,53 @@ describe('syncGuiManagedKunConfig', () => {
     })
     const cleared = JSON.parse(readFileSync(configPath, 'utf8')) as any
     expect('apiKey' in cleared.capabilities.imageGen).toBe(false)
+    expect('headers' in cleared.capabilities.imageGen).toBe(false)
+  })
+
+  it('unwraps Codex OAuth credentials and writes Codex headers for image generation', async () => {
+    if (!tempRoot) throw new Error('temp root not initialized')
+    const configPath = join(tempRoot, 'config.json')
+    const module = await import('./kun-process')
+    const codexCredentials = JSON.stringify({
+      kind: 'codex-oauth',
+      accessToken: 'codex-access-token',
+      refreshToken: 'codex-refresh-token',
+      expiresAt: Date.now() + 3600_000,
+      accountId: 'acct_123',
+      email: 'user@example.com'
+    })
+
+    await module.syncGuiManagedKunConfig(tempRoot, {
+      ...defaultKunRuntimeSettings(),
+      imageGeneration: {
+        enabled: true,
+        providerId: 'codex',
+        protocol: 'codex-responses-image',
+        baseUrl: 'https://chatgpt.com/backend-api/codex',
+        apiKey: codexCredentials,
+        model: 'gpt-image-2',
+        defaultSize: '',
+        timeoutMs: 180000
+      }
+    })
+
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as any
+    expect(parsed.capabilities.imageGen).toMatchObject({
+      enabled: true,
+      protocol: 'codex-responses-image',
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      apiKey: 'codex-access-token',
+      model: 'gpt-image-2',
+      timeoutMs: 180000,
+      headers: {
+        'ChatGPT-Account-Id': 'acct_123',
+        originator: 'codex_cli_rs',
+        'OpenAI-Beta': 'responses=experimental'
+      }
+    })
+    expect(parsed.capabilities.imageGen.headers['User-Agent']).toContain('codex_cli_rs')
+    expect(typeof parsed.capabilities.imageGen.headers.session_id).toBe('string')
+    expect(KunConfigSchema.safeParse(parsed).success).toBe(true)
   })
 
   it('keeps the config stable across repeated syncs with imageGen configured', async () => {

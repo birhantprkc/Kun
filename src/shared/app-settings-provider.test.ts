@@ -26,6 +26,7 @@ import {
   modelProviderModelProfilesForSettings,
   listModelProviderModelIds,
   modelSupportsImageInput,
+  defaultDesignSettings,
   normalizeModelProviderSettings,
   resolveKunImageGenerationSettings,
   resolveKunMusicGenerationSettings,
@@ -78,6 +79,7 @@ function settings(): AppSettingsV1 {
     claw: defaultClawSettings(),
     schedule: defaultScheduleSettings(),
     workflow: defaultWorkflowSettings(),
+    design: defaultDesignSettings(),
     terminal: defaultTerminalSettings(),
     guiUpdate: { channel: 'stable' },
     codePromptPrefix: '',
@@ -580,6 +582,58 @@ describe('model provider settings', () => {
       baseUrl: 'https://api.minimaxi.com',
       apiKey: 'mm-tp-key',
       model: 'image-01'
+    }))
+  })
+
+  it('resolves Codex subscription image generation through provider image capability', () => {
+    const codex = getModelProviderPreset('codex')
+    expect(codex).not.toBeNull()
+    const codexKey = JSON.stringify({
+      kind: 'codex-oauth',
+      accessToken: 'codex-access',
+      refreshToken: 'codex-refresh',
+      expiresAt: Date.now() + 3600_000,
+      accountId: 'acct_123',
+      email: 'user@example.com'
+    })
+    const codexProfile = modelProviderPresetProfile(codex!, codexKey)
+    expect(codexProfile).toMatchObject({
+      id: 'codex',
+      image: {
+        protocol: 'codex-responses-image',
+        baseUrl: 'https://chatgpt.com/backend-api/codex',
+        models: ['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini']
+      }
+    })
+
+    const resolved = resolveKunImageGenerationSettings({
+      ...settings(),
+      provider: {
+        ...defaultModelProviderSettings(),
+        providers: [
+          ...defaultModelProviderSettings().providers,
+          codexProfile
+        ]
+      },
+      agents: {
+        kun: {
+          ...defaultKunRuntimeSettings(),
+          imageGeneration: {
+            ...defaultKunRuntimeSettings().imageGeneration,
+            enabled: true,
+            providerId: codexProfile.id
+          }
+        }
+      }
+    })
+
+    expect(resolved).toEqual(expect.objectContaining({
+      enabled: true,
+      providerId: 'codex',
+      protocol: 'codex-responses-image',
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      apiKey: codexKey,
+      model: 'gpt-image-2'
     }))
   })
 

@@ -80,6 +80,12 @@ export const TurnSchema = z.object({
   toolCatalogDrift: z.boolean().optional(),
   guiPlan: GuiPlanContextSchema.optional(),
   /**
+   * True for renderer-owned design canvas turns. Kun advertises the
+   * `design_canvas` tool only for these turns; the renderer applies the
+   * returned ops to its canvas store.
+   */
+  guiDesignCanvas: z.boolean().optional(),
+  /**
    * Optional per-turn mode override. When set, it takes precedence over
    * the thread mode for this turn (e.g. a Plan-mode turn inside an
    * otherwise agent thread, or a Build turn that runs as agent).
@@ -126,6 +132,11 @@ export const StartTurnRequest = z.object({
    * path advertised in the context.
    */
   guiPlan: GuiPlanContextSchema.optional(),
+  /**
+   * True for renderer-owned design canvas turns. Enables the `design_canvas`
+   * tool for this turn only.
+   */
+  guiDesignCanvas: z.boolean().optional(),
   /**
    * True when the caller cannot relay structured input prompts to a
    * user (IM bridges such as WeChat/Feishu, headless runs). The turn

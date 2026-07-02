@@ -18,6 +18,17 @@ const DEFAULT_IMAGE_GENERATION = {
   timeoutMs: 180000
 }
 
+function imageGenerationProtocolLabelKey(protocol: string): string {
+  if (protocol === 'minimax-image') return 'imageGenProtocolMiniMax'
+  if (protocol === 'codex-responses-image') return 'imageGenProtocolCodex'
+  return 'imageGenProtocolOpenAi'
+}
+
+function preferredImageGenerationModel(image: { protocol?: string; models?: string[] } | undefined): string {
+  if (image?.protocol === 'codex-responses-image' && image.models?.includes('gpt-image-2')) return 'gpt-image-2'
+  return image?.models?.[0] ?? ''
+}
+
 export function ImageGenerationSettingsSection({ ctx }: { ctx: Record<string, any> }): ReactElement {
   const {
     t,
@@ -94,7 +105,7 @@ export function ImageGenerationSettingsSection({ ctx }: { ctx: Record<string, an
                         : nextProvider?.image?.protocol ?? DEFAULT_IMAGE_GENERATION_PROTOCOL,
                       model: providerId === CUSTOM_IMAGE_GENERATION_PROVIDER_ID
                         ? imageGeneration.model
-                        : nextProvider?.image?.models?.[0] ?? ''
+                        : preferredImageGenerationModel(nextProvider?.image)
                     })
                   }}
                 >
@@ -124,7 +135,7 @@ export function ImageGenerationSettingsSection({ ctx }: { ctx: Record<string, an
                   >
                     {IMAGE_GENERATION_PROTOCOLS.map((protocol) => (
                       <option key={protocol} value={protocol}>
-                        {t(protocol === 'minimax-image' ? 'imageGenProtocolMiniMax' : 'imageGenProtocolOpenAi')}
+                        {t(imageGenerationProtocolLabelKey(protocol))}
                       </option>
                     ))}
                   </select>
@@ -177,7 +188,7 @@ export function ImageGenerationSettingsSection({ ctx }: { ctx: Record<string, an
                     value={imageModelOptions.includes(imageGeneration.model) ? imageGeneration.model : ''}
                     options={imageModelOptions}
                     defaultLabel={t('modelSelectDefaultOption', {
-                      model: imageModelOptions[0] ?? ''
+                      model: preferredImageGenerationModel(selectedProviderImage)
                     })}
                     selectClassName={selectControlClass}
                     onChange={(model) => updateImageGeneration({ model })}

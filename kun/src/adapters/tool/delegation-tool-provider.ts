@@ -68,6 +68,7 @@ export function buildDelegationToolProviders(runtime: DelegationRuntime | undefi
             workspace: typeof args.workspace === 'string' ? args.workspace : context.workspace,
             ...(typeof args.model === 'string' ? { model: args.model } : {}),
             ...(typeof args.profile === 'string' ? { profile: args.profile } : {}),
+            ...(context.guiDesignCanvas ? { guiDesignCanvas: true } : {}),
             ...(args.detach === true ? { detach: true } : {}),
             ...(isPositiveInteger(args.tokenBudget) ? { tokenBudget: args.tokenBudget } : {}),
             ...(isPositiveInteger(args.timeBudgetMs) ? { timeBudgetMs: args.timeBudgetMs } : {}),

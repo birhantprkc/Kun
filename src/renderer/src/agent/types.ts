@@ -488,6 +488,7 @@ export interface AgentProvider {
         sourceRequest?: string
         title?: string
       }
+      guiDesignCanvas?: boolean
       attachmentIds?: string[]
       workspaceCheckpointId?: string
       fileReferences?: UserFileReference[]

@@ -33,7 +33,7 @@ import {
   isBackgroundShellCommandBlock,
   summarizeBackgroundShellToolBlock
 } from './message-timeline-tools'
-import { SubagentGroup } from './SubagentCallCard'
+import { SubagentGroup, type OpenChildThreadHandler } from './SubagentCallCard'
 import { InjectedMemoryMetaChip } from './injected-memory-meta-chip'
 
 export type ProcessSection = {
@@ -204,13 +204,15 @@ export function ProcessSectionRow({
   processing,
   reasoningDurationMs,
   singleReasoningSection,
-  viewportRef
+  viewportRef,
+  onOpenChildThread
 }: {
   section: ProcessSection
   processing: boolean
   reasoningDurationMs?: number
   singleReasoningSection: boolean
   viewportRef: RefObject<HTMLDivElement | null>
+  onOpenChildThread?: OpenChildThreadHandler
 }): ReactElement {
   const { t } = useTranslation('common')
   const [userExpanded, setUserExpanded] = useState<boolean | null>(null)
@@ -249,7 +251,7 @@ export function ProcessSectionRow({
   })
 
   if (section.kind === 'subagent') {
-    return <SubagentGroup blocks={section.blocks} />
+    return <SubagentGroup blocks={section.blocks} onOpenChildThread={onOpenChildThread} />
   }
 
   if (section.kind === 'execution' && section.blocks.length === 1) {

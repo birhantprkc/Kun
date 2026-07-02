@@ -15,6 +15,7 @@ import { CapabilityRegistry } from '../adapters/tool/capability-registry.js'
 import { createAgentSdkRuntime } from '../runtime/agent-sdk/agent-sdk-runtime-factory.js'
 import { buildGoalLocalTools } from '../adapters/tool/goal-tools.js'
 import { buildTodoLocalTools } from '../adapters/tool/todo-tools.js'
+import { buildDesignCanvasLocalTools } from '../adapters/tool/design-canvas-tool.js'
 import { LocalToolHost, buildDefaultLocalTools } from '../adapters/tool/local-tool-host.js'
 import { createReadArtifactTool } from '../adapters/tool/artifact-tool.js'
 import { FileArtifactStore } from '../artifacts/artifact-store.js'
@@ -98,6 +99,13 @@ export type KunServeRuntimeOptions = {
   baseUrl: string
   modelProxyUrl?: string
   endpointFormat?: ModelEndpointFormat
+  /**
+   * Extra HTTP headers merged into every default-client request (last, so
+   * they win). For providers that need more than a Bearer key — e.g. Codex
+   * sends `ChatGPT-Account-Id` + a Codex-CLI `User-Agent` with its OAuth
+   * access token.
+   */
+  headers?: Record<string, string>
   /**
    * Extra providers the runtime can route to per request. Keyed by
    * provider id (matched against `ModelRequest.providerId`); each entry
@@ -190,6 +198,7 @@ export async function createKunServeRuntime(
     endpointFormat: options.endpointFormat ?? DEFAULT_MODEL_ENDPOINT_FORMAT,
     model: options.model,
     modelCapabilities,
+    headers: options.headers,
     debugSink: llmDebug,
     ...streamIdleOverride
   })
@@ -217,6 +226,7 @@ export async function createKunServeRuntime(
         endpointFormat: provider.endpointFormat ?? options.endpointFormat ?? DEFAULT_MODEL_ENDPOINT_FORMAT,
         model: options.model,
         modelCapabilities,
+        headers: provider.headers,
         debugSink: llmDebug,
         ...streamIdleOverride
       })
@@ -320,6 +330,15 @@ export async function createKunServeRuntime(
   const musicGenProviders = buildMusicGenToolProviders(options.capabilities?.musicGen, { nowIso })
   const videoGenProviders = buildVideoGenToolProviders(options.capabilities?.videoGen, { nowIso })
   const computerUseProviders = await buildComputerUseToolProviders(options.capabilities?.computerUse)
+  const designCanvasProvider = {
+    id: 'design-canvas',
+    kind: 'gui' as const,
+    enabled: true,
+    available: true,
+    // Safe to include in child runs: the tool is still gated per turn by
+    // `context.guiDesignCanvas`, so only design-canvas child turns see it.
+    tools: buildDesignCanvasLocalTools()
+  }
   const taskGraphTool = createTaskGraphTool({ rootDir: join(options.dataDir, 'task-graphs') })
   const baseToolProviders = [
     {
@@ -343,7 +362,8 @@ export async function createKunServeRuntime(
     ...imageGenProviders.providers,
     ...speechGenProviders.providers,
     ...musicGenProviders.providers,
-    ...videoGenProviders.providers
+    ...videoGenProviders.providers,
+    designCanvasProvider,
     // NOTE: computer_use is intentionally NOT in baseToolProviders — host
     // control must not be delegable to subagents. It is added to the main
     // registry only (below).

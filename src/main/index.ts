@@ -39,6 +39,7 @@ import {
   mergeWorkflowSettings,
   mergeAppBehaviorSettings,
   mergeModelProviderSettings,
+  mergeDesignSettings,
   mergeScheduleSettings,
   mergeWriteSettings,
   mergeTerminalSettings,
@@ -1728,6 +1729,7 @@ app.whenReady().then(async () => {
       claw: mergeClawSettings(prev.claw, effectivePartial.claw),
       schedule: mergeScheduleSettings(prev.schedule, effectivePartial.schedule),
       workflow: mergeWorkflowSettings(prev.workflow, effectivePartial.workflow),
+      design: mergeDesignSettings(prev.design, effectivePartial.design),
       terminal: mergeTerminalSettings(prev.terminal, effectivePartial.terminal),
       guiUpdate: { ...prev.guiUpdate, ...(effectivePartial.guiUpdate ?? {}) }
     })
@@ -1811,6 +1813,7 @@ app.whenReady().then(async () => {
   })
 
   registerRuntimeSseIpc({ ipcMain, store, ensureRuntime, logError })
+
   registerTerminalPtyIpc({
     ipcMain,
     getMainWindow: () => mainWindow,
