@@ -779,7 +779,7 @@
   "portDesc": "Port used by the local AI assistant service. Most users do not need to change it.",
   "portInvalid": "Port must be between 10000 and 65535.",
   "runtimeToken": "Local access token (optional)",
-  "runtimeTokenDesc": "Protects the assistant service running on this computer. Fill this only if another local program needs to connect to it.",
+  "runtimeTokenDesc": "Protects the assistant service running on this computer. Kun generates one automatically when blank; fill it only if another local program needs a fixed token.",
   "configFilePath": "External tool config path",
   "configFilePathDesc": "Path to the MCP external tool server JSON config.",
   "skillsLocation": "Skill save location",

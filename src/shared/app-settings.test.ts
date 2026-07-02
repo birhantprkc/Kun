@@ -506,14 +506,14 @@ describe('claw settings', () => {
 })
 
 describe('isKunRuntimeInsecure', () => {
-  it('treats an empty runtime token as effectively insecure', () => {
+  it('keeps auth enabled even when the runtime token is empty', () => {
     expect(
       isKunRuntimeInsecure({
         ...defaultKunRuntimeSettings(),
         insecure: false,
         runtimeToken: ''
       })
-    ).toBe(true)
+    ).toBe(false)
   })
 
   it('keeps auth enabled when a token exists and insecure is false', () => {
@@ -524,6 +524,16 @@ describe('isKunRuntimeInsecure', () => {
         runtimeToken: 'tok-1'
       })
     ).toBe(false)
+  })
+
+  it('honors explicit insecure mode', () => {
+    expect(
+      isKunRuntimeInsecure({
+        ...defaultKunRuntimeSettings(),
+        insecure: true,
+        runtimeToken: 'tok-1'
+      })
+    ).toBe(true)
   })
 })
 

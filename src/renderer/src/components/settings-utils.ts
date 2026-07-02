@@ -37,6 +37,7 @@ import type { GuiUpdateInfo } from '@shared/gui-update'
 
 type RendererSettingsShape = AppSettingsPatch
 type SettingsPatch = AppSettingsPatch
+const SETTINGS_DIFF_NO_CHANGE = Symbol('settings-diff-no-change')
 
 export const DEFAULT_WORKSPACE_ROOT = '~/.kun/default_workspace'
 
@@ -94,6 +95,11 @@ export function mergeSettings(current: AppSettingsV1, patch: SettingsPatch): App
   }
 }
 
+export function diffSettingsPatch(base: AppSettingsV1, next: AppSettingsV1): AppSettingsPatch {
+  const diff = diffSettingsValue(base, next)
+  return diff === SETTINGS_DIFF_NO_CHANGE ? {} : diff as AppSettingsPatch
+}
+
 export function coerceRendererSettings(settings: AppSettingsV1): AppSettingsV1 {
   const raw = settings as RendererSettingsShape
   const theme =
@@ -141,6 +147,42 @@ export function coerceRendererSettings(settings: AppSettingsV1): AppSettingsV1 {
     codePromptPrefix: typeof raw.codePromptPrefix === 'string' ? raw.codePromptPrefix : '',
     disabledSkillIds: normalizeDisabledSkillIds(raw.disabledSkillIds)
   }
+}
+
+function diffSettingsValue(base: unknown, next: unknown): unknown | typeof SETTINGS_DIFF_NO_CHANGE {
+  if (settingsValueEqual(base, next)) return SETTINGS_DIFF_NO_CHANGE
+  if (isPlainSettingsRecord(base) && isPlainSettingsRecord(next)) {
+    const out: Record<string, unknown> = {}
+    for (const key of Object.keys(next).sort()) {
+      const childDiff = diffSettingsValue(base[key], next[key])
+      if (childDiff !== SETTINGS_DIFF_NO_CHANGE) out[key] = childDiff
+    }
+    return Object.keys(out).length > 0 ? out : SETTINGS_DIFF_NO_CHANGE
+  }
+  return next
+}
+
+function settingsValueEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  return stableSettingsStringify(a) === stableSettingsStringify(b)
+}
+
+function stableSettingsStringify(value: unknown): string {
+  return JSON.stringify(canonicalSettingsValue(value))
+}
+
+function canonicalSettingsValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalSettingsValue)
+  if (!isPlainSettingsRecord(value)) return value
+  const out: Record<string, unknown> = {}
+  for (const key of Object.keys(value).sort()) {
+    out[key] = canonicalSettingsValue(value[key])
+  }
+  return out
+}
+
+function isPlainSettingsRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function normalizeDisabledSkillIds(value: unknown): string[] {

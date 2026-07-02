@@ -157,7 +157,7 @@ Saved settings should now be just:
       "autoStart": true,
       "apiKey": "",
       "baseUrl": "https://api.deepseek.com/beta",
-      "runtimeToken": "",
+      "runtimeToken": "<generated-local-token>",
       "dataDir": "~/.kun/data",
       "model": "deepseek-v4-pro",
       "approvalPolicy": "auto",

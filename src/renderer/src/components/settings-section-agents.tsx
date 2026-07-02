@@ -695,15 +695,10 @@ export function AgentsSettingsSection({ ctx }: { ctx: Record<string, any> }): Re
                   />
                   <SettingRow
                     title={t('kunInsecure')}
-                    description={
-                      kun.runtimeToken.trim()
-                        ? t('kunInsecureDesc')
-                        : t('kunInsecureForcedDesc')
-                    }
+                    description={t('kunInsecureDesc')}
                     control={
                       <Toggle
                         checked={isKunRuntimeInsecure(kun)}
-                        disabled={!kun.runtimeToken.trim()}
                         onChange={(v) => updateKun({ insecure: v })}
                       />
                     }

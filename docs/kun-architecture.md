@@ -146,7 +146,7 @@ Renderer 只应展示 Kun。需要删除或保持删除的 UI 面包括：
       "autoStart": true,
       "apiKey": "",
       "baseUrl": "https://api.deepseek.com/beta",
-      "runtimeToken": "",
+      "runtimeToken": "<generated-local-token>",
       "dataDir": "~/.kun/data",
       "model": "deepseek-v4-pro",
       "approvalPolicy": "auto",

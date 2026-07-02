@@ -135,7 +135,13 @@ export function mergeModelProviderSettings(
 ): ModelProviderSettingsV1 {
   return normalizeModelProviderSettings({
     ...current,
-    ...(patch ?? {})
+    ...(patch ?? {}),
+    proxy: patch?.proxy
+      ? {
+          ...current.proxy,
+          ...patch.proxy
+        }
+      : current.proxy
   })
 }
 

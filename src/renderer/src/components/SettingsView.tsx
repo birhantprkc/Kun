@@ -48,6 +48,7 @@ import { useSettingsGuiUpdate } from './use-settings-gui-update'
 import {
   DEFAULT_WORKSPACE_ROOT,
   coerceRendererSettings,
+  diffSettingsPatch,
   hasValidPort,
   listSettingsText,
   mergeSettings,
@@ -194,6 +195,7 @@ export function SettingsView(): ReactElement {
   // exits that bypass goBack() (Esc, route changes, closing settings) don't
   // drop the last edit made within the 450ms debounce window (issue #602).
   const pendingSnapshotRef = useRef<AppSettingsV1 | null>(null)
+  const persistedSettingsRef = useRef<AppSettingsV1 | null>(null)
   const flushOnUnmountRef = useRef<() => void>(() => {})
   const agentsSectionRef = useRef<HTMLDivElement | null>(null)
   const skillSectionRef = useRef<HTMLDivElement | null>(null)
@@ -247,7 +249,11 @@ export function SettingsView(): ReactElement {
     void rendererRuntimeClient
       .getSettings({ forceRefresh: true })
       .then((s) => {
-        if (!cancelled) setForm(coerceRendererSettings(s))
+        if (!cancelled) {
+          const next = coerceRendererSettings(s)
+          persistedSettingsRef.current = next
+          setForm(next)
+        }
       })
       .catch((e: unknown) => {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e))
@@ -286,7 +292,11 @@ export function SettingsView(): ReactElement {
   useEffect(() => {
     const onSettingsChanged = (event: Event): void => {
       const next = (event as CustomEvent<AppSettingsV1>).detail
-      if (next) setForm(coerceRendererSettings(next))
+      if (next) {
+        const coerced = coerceRendererSettings(next)
+        persistedSettingsRef.current = coerced
+        setForm(coerced)
+      }
     }
     window.addEventListener(SETTINGS_CHANGED_EVENT, onSettingsChanged)
     return () => window.removeEventListener(SETTINGS_CHANGED_EVENT, onSettingsChanged)
@@ -695,13 +705,21 @@ export function SettingsView(): ReactElement {
     setSaveError(null)
 
     try {
+      const expandedSnapshot = expandSettingsHomePathsForUse(snapshot, settingsHomeDir, settingsPlatform)
+      const expandedBase = expandSettingsHomePathsForUse(
+        persistedSettingsRef.current ?? snapshot,
+        settingsHomeDir,
+        settingsPlatform
+      )
+      const patch = diffSettingsPatch(expandedBase, expandedSnapshot)
       const next = coerceRendererSettings(
-        await rendererRuntimeClient.setSettings(
-          expandSettingsHomePathsForUse(snapshot, settingsHomeDir, settingsPlatform)
-        )
+        Object.keys(patch).length > 0
+          ? await rendererRuntimeClient.setSettings(patch)
+          : await rendererRuntimeClient.getSettings({ forceRefresh: true })
       )
       if (version !== draftVersion.current) return
 
+      persistedSettingsRef.current = next
       setForm(next)
       emitRendererSettingsChanged(next)
       await applyI18n(next.locale)
@@ -774,10 +792,18 @@ export function SettingsView(): ReactElement {
     const snapshot = pendingSnapshotRef.current
     pendingSnapshotRef.current = null
     if (!snapshot || !hasValidPort(snapshot)) return
+    const expandedSnapshot = expandSettingsHomePathsForUse(snapshot, settingsHomeDir, settingsPlatform)
+    const expandedBase = expandSettingsHomePathsForUse(
+      persistedSettingsRef.current ?? snapshot,
+      settingsHomeDir,
+      settingsPlatform
+    )
+    const patch = diffSettingsPatch(expandedBase, expandedSnapshot)
     void rendererRuntimeClient
-      .setSettings(expandSettingsHomePathsForUse(snapshot, settingsHomeDir, settingsPlatform))
+      .setSettings(patch)
       .then((saved) => {
         const next = coerceRendererSettings(saved)
+        persistedSettingsRef.current = next
         emitRendererSettingsChanged(next)
         // App-wide effects the normal save path runs, so a last-moment locale or
         // UI-token edit still takes effect immediately rather than on next start.
