@@ -955,8 +955,8 @@ function deepseekTextModelProfile(): ModelProviderModelProfileV1 {
 /**
  * Stored provider settings may predate the capability metadata in the presets
  * (older saves carry empty modelProfiles). For known preset providers the
- * preset is the source of truth, so its profiles override stale stored ones;
- * stored profiles for models the preset does not know are kept.
+ * preset fills missing profiles, while stored profiles win so model edits made
+ * in Settings keep surviving normalization.
  */
 function withPresetModelProfiles(
   providerId: string,
@@ -966,7 +966,7 @@ function withPresetModelProfiles(
   const presetProfiles = presetModelProfilesForProvider(providerId)
   if (!presetProfiles) return stored
   const knownModelKeys = new Set(models.map(normalizeModelKey).filter(Boolean))
-  const merged = { ...stored }
+  const merged: Record<string, ModelProviderModelProfileV1> = {}
   for (const [rawModelId, presetProfile] of Object.entries(presetProfiles)) {
     const modelId = normalizeModelKey(rawModelId)
     if (!modelId) continue
@@ -976,7 +976,7 @@ function withPresetModelProfiles(
     }
     merged[modelId] = normalizeModelProviderModelProfile(presetProfile)
   }
-  return merged
+  return { ...merged, ...stored }
 }
 
 function presetModelProfilesForProvider(

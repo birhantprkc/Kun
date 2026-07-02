@@ -36,7 +36,8 @@ import {
   resolveKunSpeechToTextSettings,
   resolveKunTextToSpeechSettings,
   resolveKunVideoGenerationSettings,
-  type AppSettingsV1
+  type AppSettingsV1,
+  type ModelProviderModelProfileV1
 } from './app-settings'
 
 function settings(): AppSettingsV1 {
@@ -637,6 +638,37 @@ describe('model provider settings', () => {
     }))
   })
 
+  it('uses 1M context defaults for Codex GPT 5.x models', () => {
+    const codex = getModelProviderPreset('codex')
+    expect(codex).not.toBeNull()
+    const codexProfile = modelProviderPresetProfile(codex!, 'sk-codex')
+    for (const modelId of ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']) {
+      expect(codexProfile.modelProfiles[modelId]).toEqual(expect.objectContaining({
+        contextWindowTokens: 1_000_000
+      }))
+    }
+
+    const resolved = resolveKunRuntimeSettings({
+      ...settings(),
+      provider: {
+        ...defaultModelProviderSettings(),
+        providers: [
+          ...defaultModelProviderSettings().providers,
+          codexProfile
+        ]
+      },
+      agents: {
+        kun: {
+          ...defaultKunRuntimeSettings(),
+          providerId: codexProfile.id,
+          model: 'gpt-5.5'
+        }
+      }
+    })
+
+    expect(resolved.modelProfiles['gpt-5.5'].contextWindowTokens).toBe(1_000_000)
+  })
+
   it('routes MiniMax token plan media capabilities through the selected region host', () => {
     const minimax = getModelProviderPreset('minimax')
     expect(minimax).not.toBeNull()
@@ -839,6 +871,45 @@ describe('model provider settings', () => {
     expect(modelSupportsImageInput(resolved.modelProfiles['mimo-v2.5'])).toBe(true)
     expect(modelSupportsImageInput(resolved.modelProfiles['mimo-v2-omni'])).toBe(true)
     expect(resolved.modelProfiles['mimo-v2.5-pro']).toBeDefined()
+  })
+
+  it('preserves user-edited profiles for preset provider models', () => {
+    const codex = getModelProviderPreset('codex')
+    expect(codex).not.toBeNull()
+    const codexProfile = modelProviderPresetProfile(codex!, 'sk-codex')
+    const editedProfile: ModelProviderModelProfileV1 = {
+      contextWindowTokens: 256_000,
+      maxOutputTokens: 32_000,
+      inputModalities: ['text'],
+      outputModalities: ['text'],
+      supportsToolCalling: false,
+      messageParts: ['text']
+    }
+    const resolved = resolveKunRuntimeSettings({
+      ...settings(),
+      provider: {
+        ...defaultModelProviderSettings(),
+        providers: [
+          ...defaultModelProviderSettings().providers,
+          {
+            ...codexProfile,
+            modelProfiles: {
+              ...codexProfile.modelProfiles,
+              'gpt-5.5': editedProfile
+            }
+          }
+        ]
+      },
+      agents: {
+        kun: {
+          ...defaultKunRuntimeSettings(),
+          providerId: codexProfile.id,
+          model: 'gpt-5.5'
+        }
+      }
+    })
+
+    expect(resolved.modelProfiles['gpt-5.5']).toEqual(editedProfile)
   })
 
   it('resolves Xiaomi speech-to-text through provider speech capability', () => {
