@@ -49,6 +49,7 @@ export type QueuedUserMessage = {
     sourceRequest?: string
     title?: string
   }
+  guiDesignCanvas?: boolean
 }
 
 /**
@@ -73,6 +74,7 @@ export type SendMessageOverrides = {
   reasoningEffort?: string
   displayText?: string
   guiPlan?: GuiPlanMessageContext
+  guiDesignCanvas?: boolean
   attachmentIds?: string[]
   attachments?: AttachmentReference[]
   fileReferences?: UserFileReference[]

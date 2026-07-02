@@ -11,6 +11,7 @@ import { MessageTimelineEmptyHero, ThreadForkBanner, ThreadForkPoint } from './m
 import { GeneratedFilesPanel, MessageBubble } from './message-timeline-bubbles'
 import { ReviewPlanCard, ReviewSummaryCard, TurnChangeSummary, WorkMetaRow } from './message-timeline-cards'
 import { ProcessSectionRow, groupProcessSections } from './message-timeline-process'
+import type { OpenChildThreadHandler } from './SubagentCallCard'
 import {
   AnimatedWorkLogo,
   IKUN_WORK_LOGO_VARIANT_LABEL_KEYS,
@@ -53,6 +54,7 @@ type Props = {
   /** Opens/focuses the Plan panel (Open button on the inline card). */
   onOpenPlan?: () => void
   compactCards?: boolean
+  onOpenChildThread?: OpenChildThreadHandler
 }
 
 type CompactionTimelineBlock = Extract<ChatBlock, { kind: 'compaction' }>
@@ -161,7 +163,8 @@ export function MessageTimeline({
   planActionsBusy,
   onBuildPlan,
   onOpenPlan,
-  compactCards = false
+  compactCards = false,
+  onOpenChildThread
 }: Props): ReactElement {
   const { t } = useTranslation('common')
   const {
@@ -365,6 +368,7 @@ export function MessageTimeline({
                 planActionsBusy={planActionsBusy}
                 onBuildPlan={onBuildPlan}
                 onOpenPlan={onOpenPlan}
+                onOpenChildThread={onOpenChildThread}
                 viewportRef={containerRef}
                 compactCards={compactCards}
               />
@@ -400,6 +404,7 @@ export function MessageTimeline({
             live={live}
             devPreviewCard={devPreviewCard}
             viewportRef={containerRef}
+            onOpenChildThread={onOpenChildThread}
             compactCards={compactCards}
             durationMs={
               currentTurnUserId && typeof turnStartedAtByUserId[currentTurnUserId] === 'number'
@@ -433,6 +438,7 @@ function MessageTurn({
   planActionsBusy,
   onBuildPlan,
   onOpenPlan,
+  onOpenChildThread,
   viewportRef,
   compactCards = false
 }: {
@@ -446,6 +452,7 @@ function MessageTurn({
   planActionsBusy?: boolean
   onBuildPlan?: () => void
   onOpenPlan?: () => void
+  onOpenChildThread?: OpenChildThreadHandler
   viewportRef: RefObject<HTMLDivElement | null>
   compactCards?: boolean
 }): ReactElement {
@@ -586,6 +593,7 @@ function MessageTurn({
                   reasoningDurationMs={reasoningDurationMs}
                   singleReasoningSection={reasoningSectionCount === 1}
                   viewportRef={viewportRef}
+                  onOpenChildThread={onOpenChildThread}
                 />
               ))}
             </div>
@@ -700,6 +708,7 @@ const MemoMessageTurn = memo(MessageTurn, (prev, next) => (
   prev.planActionsBusy === next.planActionsBusy &&
   prev.onBuildPlan === next.onBuildPlan &&
   prev.onOpenPlan === next.onOpenPlan &&
+  prev.onOpenChildThread === next.onOpenChildThread &&
   prev.compactCards === next.compactCards &&
   prev.viewportRef === next.viewportRef
 ))

@@ -144,10 +144,12 @@ describe('design board helpers', () => {
     })
   })
 
-  it('updates an existing linked frame only from a custom artifact node', () => {
+  it('does not let artifact node geometry overwrite an existing linked frame', () => {
     const doc = createEmptyDocument()
     const root = doc.objects[doc.rootId]
     const existing = createHtmlFrameShape('Old', 10, 20, 'custom', 'desktop')
+    existing.width = 1280
+    existing.height = 900
     doc.objects[existing.id] = { ...existing, parentId: doc.rootId }
     doc.objects[doc.rootId] = { ...root, children: [existing.id] }
 
@@ -162,10 +164,10 @@ describe('design board helpers', () => {
     expect(synced.updatedFrameIds).toEqual([existing.id])
     expect(synced.document.objects[existing.id]).toMatchObject({
       name: 'Renamed',
-      x: 300,
-      y: 400,
-      width: 700,
-      height: 500
+      x: 10,
+      y: 20,
+      width: 1280,
+      height: 900
     })
   })
 

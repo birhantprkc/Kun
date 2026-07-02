@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { CapabilityRegistry } from '../src/adapters/tool/capability-registry.js'
+import { createDesignCanvasTool } from '../src/adapters/tool/design-canvas-tool.js'
 import { LocalToolHost, buildDefaultLocalTools } from '../src/adapters/tool/local-tool-host.js'
 import { InMemoryEventBus } from '../src/adapters/in-memory-event-bus.js'
 import { InMemorySessionStore } from '../src/adapters/in-memory-session-store.js'
@@ -302,6 +303,40 @@ describe('child agent executor', () => {
     expect(toolNames.length).toBeGreaterThan(4)
     const restricted = new Set(['read', 'grep', 'find', 'ls'])
     expect(toolNames.some((name) => !restricted.has(name))).toBe(true)
+  })
+
+  it('advertises design_canvas to a guiDesignCanvas child turn', async () => {
+    const seen: ModelRequest[] = []
+    const registry = new CapabilityRegistry([{
+      id: 'design-canvas',
+      kind: 'gui',
+      enabled: true,
+      available: true,
+      tools: [createDesignCanvasTool()]
+    }])
+    const executor = createChildAgentExecutor({
+      model: model([
+        { kind: 'assistant_text_delta', text: 'done' },
+        { kind: 'completed', stopReason: 'stop' }
+      ], seen),
+      toolHost: new LocalToolHost({ registry }),
+      prefix: createImmutablePrefix({ systemPrompt: 'child system' }),
+      defaultModel: 'child-test',
+      nowIso: () => '2026-06-03T00:00:00.000Z'
+    })
+
+    await executor({
+      childId: 'child_canvas',
+      parentThreadId: 'thr_parent',
+      parentTurnId: 'turn_parent',
+      prompt: 'Add a screen',
+      toolPolicy: 'inherit',
+      guiDesignCanvas: true,
+      signal: new AbortController().signal
+    })
+
+    const toolNames = (seen[0]?.tools ?? []).map((tool) => tool.name)
+    expect(toolNames).toContain('design_canvas')
   })
 
   it('honors an explicit allowedTools list over the tool policy', async () => {

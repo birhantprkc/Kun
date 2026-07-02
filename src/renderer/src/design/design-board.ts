@@ -105,6 +105,12 @@ function frameMatchesNode(shape: CanvasShape, node: DesignArtifactNode): boolean
   )
 }
 
+function frameNodeSizeMode(shape: CanvasShape, artifact: DesignArtifact): DesignArtifactNode['sizeMode'] {
+  const current = artifact.node
+  if (!current) return 'manual'
+  return current.sizeMode === 'auto' && frameMatchesNode(shape, current) ? 'auto' : 'manual'
+}
+
 export function syncHtmlArtifactsToBoardDocument(
   doc: CanvasDocument,
   artifacts: readonly DesignArtifact[]
@@ -140,9 +146,6 @@ export function syncHtmlArtifactsToBoardDocument(
       const patch: Partial<CanvasShape> = {}
       const nextName = artifact.title || existing.name
       if (existing.name !== nextName) patch.name = nextName
-      if (customNode && !frameMatchesNode(existing, customNode)) {
-        Object.assign(patch, nodeRect(customNode))
-      }
       if (Object.keys(patch).length > 0) {
         if (!next) next = cloneDocument(doc)
         next.objects[existing.id] = { ...next.objects[existing.id], ...patch }
@@ -190,7 +193,11 @@ export function syncHtmlFrameNodesToArtifacts(doc: CanvasDocument): void {
     if (!artifact) continue
     const patch = frameNodePatch(shape)
     if (!patch) continue
-    const nextNode = { ...patch, viewMode: artifact.node?.viewMode ?? patch.viewMode }
+    const nextNode = {
+      ...patch,
+      sizeMode: frameNodeSizeMode(shape, artifact),
+      viewMode: artifact.node?.viewMode ?? patch.viewMode
+    }
     const current = artifact.node
     if (
       current &&

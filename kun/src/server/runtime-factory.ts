@@ -15,6 +15,7 @@ import { CapabilityRegistry } from '../adapters/tool/capability-registry.js'
 import { createAgentSdkRuntime } from '../runtime/agent-sdk/agent-sdk-runtime-factory.js'
 import { buildGoalLocalTools } from '../adapters/tool/goal-tools.js'
 import { buildTodoLocalTools } from '../adapters/tool/todo-tools.js'
+import { createDesignCanvasTool } from '../adapters/tool/design-canvas-tool.js'
 import { LocalToolHost, buildDefaultLocalTools } from '../adapters/tool/local-tool-host.js'
 import { buildMcpToolProviders } from '../adapters/tool/mcp-tool-provider.js'
 import { buildMemoryToolProviders } from '../adapters/tool/memory-tool-provider.js'
@@ -310,6 +311,15 @@ export async function createKunServeRuntime(
   const musicGenProviders = buildMusicGenToolProviders(options.capabilities?.musicGen, { nowIso })
   const videoGenProviders = buildVideoGenToolProviders(options.capabilities?.videoGen, { nowIso })
   const computerUseProviders = await buildComputerUseToolProviders(options.capabilities?.computerUse)
+  const designCanvasProvider = {
+    id: 'design-canvas',
+    kind: 'gui' as const,
+    enabled: true,
+    available: true,
+    // Safe to include in child runs: the tool is still gated per turn by
+    // `context.guiDesignCanvas`, so only design-canvas child turns see it.
+    tools: [createDesignCanvasTool()]
+  }
   const baseToolProviders = [
     {
       id: 'builtin',
@@ -325,7 +335,8 @@ export async function createKunServeRuntime(
     ...imageGenProviders.providers,
     ...speechGenProviders.providers,
     ...musicGenProviders.providers,
-    ...videoGenProviders.providers
+    ...videoGenProviders.providers,
+    designCanvasProvider,
     // NOTE: computer_use is intentionally NOT in baseToolProviders — host
     // control must not be delegable to subagents. It is added to the main
     // registry only (below).

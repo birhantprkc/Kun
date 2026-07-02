@@ -77,7 +77,7 @@ export function extractDesignCanvasToolBlocks(text: string): unknown[][] {
   return out
 }
 
-function normalizeDesignCanvasToolCall(value: unknown): unknown[] {
+export function normalizeDesignCanvasToolCall(value: unknown): unknown[] {
   if (Array.isArray(value)) {
     if (value.every((item) => isRecord(item) && typeof item.op === 'string')) {
       return value
@@ -85,6 +85,10 @@ function normalizeDesignCanvasToolCall(value: unknown): unknown[] {
     return value.flatMap((item) => normalizeDesignCanvasToolCall(item))
   }
   if (!isRecord(value)) return []
+
+  if (typeof value.op === 'string') {
+    return [value]
+  }
 
   const action = typeof value.action === 'string' ? value.action : ''
   if (action === 'create_board') {
@@ -111,6 +115,14 @@ function normalizeDesignCanvasToolCall(value: unknown): unknown[] {
   return []
 }
 
+export function extractCanvasOpBlocksFromValue(value: unknown): unknown[][] {
+  if (isRecord(value) && Array.isArray(value.ops)) {
+    return value.ops.length > 0 ? [value.ops] : []
+  }
+  const ops = normalizeDesignCanvasToolCall(value)
+  return ops.length > 0 ? [ops] : []
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
@@ -127,21 +139,27 @@ function copyOptionalFields(
 }
 
 /**
- * Extract BOTH `design_canvas` and legacy `shapeops` blocks in a SINGLE pass,
- * preserving their order of appearance in the source text. This source-ordering
- * is what makes incremental (streaming) application safe: as the assistant text
- * grows token by token, completed blocks are only ever appended, so the prefix
- * of already-applied blocks never shifts. (The split `[...design_canvas,
- * ...shapeops]` form in `applyShapeOpsFromText` is fine for a finished turn but
- * would re-index blocks mid-stream when the two fence types interleave.)
+ * Extract `design_canvas`, legacy `shapeops`, and compatible `json` blocks in a
+ * SINGLE pass, preserving their order of appearance in the source text. This
+ * source-ordering is what makes incremental (streaming) application safe: as
+ * the assistant text grows token by token, completed blocks are only ever
+ * appended, so the prefix of already-applied blocks never shifts. (The split
+ * `[...design_canvas, ...shapeops]` form in `applyShapeOpsFromText` is fine for
+ * a finished turn but would re-index blocks mid-stream when the two fence types
+ * interleave.)
  *
- * Only COMPLETE, valid blocks are returned — the closing ``` is required by the
- * regex and malformed JSON is skipped — so a half-streamed block is simply
+ * Some models ignore the requested `design_canvas` fence and emit the exact
+ * tool-call JSON under a plain `json` fence. We accept those only when the
+ * parsed value normalizes to known canvas ops, so unrelated JSON examples remain
+ * inert.
+ *
+ * Only COMPLETE, valid blocks are returned — the closing ``` is required by
+ * the regex and malformed JSON is skipped — so a half-streamed block is simply
  * absent until it finishes.
  */
 export function extractCanvasOpBlocks(text: string): unknown[][] {
   const out: unknown[][] = []
-  const re = /```(design_canvas|shapeops)\s*([\s\S]*?)```/g
+  const re = /```(design_canvas|shapeops|json)\s*([\s\S]*?)```/g
   let m: RegExpExecArray | null
   while ((m = re.exec(text)) !== null) {
     const fence = m[1]
@@ -149,7 +167,7 @@ export function extractCanvasOpBlocks(text: string): unknown[][] {
     if (!raw) continue
     try {
       const parsed = JSON.parse(raw)
-      if (fence === 'design_canvas') {
+      if (fence === 'design_canvas' || fence === 'json') {
         const ops = normalizeDesignCanvasToolCall(parsed)
         if (ops.length > 0) out.push(ops)
       } else if (Array.isArray(parsed)) {
@@ -171,6 +189,17 @@ export type ApplyCanvasOpsSinceResult = {
   totalBlocks: number
 }
 
+export function applyCanvasOpBlocks(blocks: unknown[][], source = 'ai'): ApplyShapeOpsResult {
+  const affectedIds: string[] = []
+  const errors: OpError[] = []
+  for (let i = 0; i < blocks.length; i += 1) {
+    const result = executeOps(blocks[i], `${source}:${i}`)
+    affectedIds.push(...result.affectedIds)
+    errors.push(...result.errors)
+  }
+  return { affectedIds, errors, batchCount: blocks.length }
+}
+
 /**
  * Apply only the canvas-op blocks at index ≥ `startIndex` from `text`, executing
  * each as its own atomic undo batch. Returns the new total block count so the
@@ -181,14 +210,8 @@ export type ApplyCanvasOpsSinceResult = {
  */
 export function applyCanvasOpsSince(text: string, startIndex: number): ApplyCanvasOpsSinceResult {
   const blocks = extractCanvasOpBlocks(text)
-  const affectedIds: string[] = []
-  const errors: OpError[] = []
-  for (let i = Math.max(0, startIndex); i < blocks.length; i += 1) {
-    const result = executeOps(blocks[i], `ai:${i}`)
-    affectedIds.push(...result.affectedIds)
-    errors.push(...result.errors)
-  }
-  return { affectedIds, errors, totalBlocks: blocks.length }
+  const result = applyCanvasOpBlocks(blocks.slice(Math.max(0, startIndex)), 'ai')
+  return { affectedIds: result.affectedIds, errors: result.errors, totalBlocks: blocks.length }
 }
 
 export type ApplyShapeOpsResult = {

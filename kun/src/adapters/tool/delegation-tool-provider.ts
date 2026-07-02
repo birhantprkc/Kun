@@ -47,6 +47,7 @@ export function buildDelegationToolProviders(runtime: DelegationRuntime | undefi
             workspace: typeof args.workspace === 'string' ? args.workspace : context.workspace,
             ...(typeof args.model === 'string' ? { model: args.model } : {}),
             ...(typeof args.profile === 'string' ? { profile: args.profile } : {}),
+            ...(context.guiDesignCanvas ? { guiDesignCanvas: true } : {}),
             ...(args.detach === true ? { detach: true } : {}),
             // Emit a partial result the moment the child id exists, so the GUI
             // can offer "open session" (and stream the child live) while the

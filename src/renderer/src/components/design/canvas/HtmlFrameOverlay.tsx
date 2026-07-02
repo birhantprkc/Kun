@@ -28,6 +28,33 @@ const AI_CURSOR_TTL_MS = 4500
 const PREVIEW_FAST_POLL_MS = 6_000
 /** Give up polling a preview that never lands after this (matches the page-generation ceiling). */
 const PREVIEW_MAX_WAIT_MS = 300_000
+const FRAME_AUTO_GROW_THRESHOLD = 12
+const FRAME_AUTO_GROW_MAX_HEIGHT = 12_000
+
+const CONTENT_SIZE_QUERY = `(() => {
+  const html = document.documentElement
+  const body = document.body
+  const nums = (...values) => values.filter((v) => Number.isFinite(v) && v > 0)
+  const width = Math.max(...nums(
+    html?.scrollWidth,
+    html?.offsetWidth,
+    html?.clientWidth,
+    body?.scrollWidth,
+    body?.offsetWidth,
+    body?.clientWidth,
+    window.innerWidth
+  ), 1)
+  const height = Math.max(...nums(
+    html?.scrollHeight,
+    html?.offsetHeight,
+    html?.clientHeight,
+    body?.scrollHeight,
+    body?.offsetHeight,
+    body?.clientHeight,
+    window.innerHeight
+  ), 1)
+  return { width: Math.ceil(width), height: Math.ceil(height) }
+})()`
 
 function qualityBadgeClasses(kind: ReturnType<typeof summarizeDesignHtmlQualityStatus>['kind']): string {
   if (kind === 'critical') return 'border-red-300/70 bg-red-50/92 text-red-600'
@@ -85,6 +112,7 @@ type ScreenOverlayProps = {
   screenY: number
   screenWidth: number
   screenHeight: number
+  zoom: number
   active: boolean
   interactive: boolean
   panning: boolean
@@ -104,6 +132,7 @@ function ScreenOverlayInner({
   screenY,
   screenWidth,
   screenHeight,
+  zoom,
   active,
   interactive,
   panning,
@@ -134,6 +163,7 @@ function ScreenOverlayInner({
   const aiFadeTimerRef = useRef<number>(0)
   const firstRevisionRef = useRef<number | null>(null)
   const qualitySignatureRef = useRef('')
+  const measurementTimersRef = useRef<number[]>([])
   const [qualityChecked, setQualityChecked] = useState(false)
   const [qualityFindings, setQualityFindings] = useState<DesignHtmlQualityFinding[]>([])
   const [qualityDetailsOpen, setQualityDetailsOpen] = useState(false)
@@ -147,6 +177,9 @@ function ScreenOverlayInner({
     shape.htmlArtifactId ? s.parallelPageStates[shape.htmlArtifactId] : undefined
   )
   const setFileError = useDesignWorkspaceStore((s) => s.setFileError)
+
+  const canvasWidth = Math.max(1, shape.width)
+  const canvasHeight = Math.max(1, shape.height)
 
   useEffect(() => {
     let cancelled = false
@@ -229,8 +262,8 @@ function ScreenOverlayInner({
       event.preventDefault()
       event.stopPropagation()
       const rect = event.currentTarget.getBoundingClientRect()
-      const x = event.clientX - rect.left
-      const y = event.clientY - rect.top
+      const x = rect.width > 0 ? ((event.clientX - rect.left) / rect.width) * canvasWidth : 0
+      const y = rect.height > 0 ? ((event.clientY - rect.top) / rect.height) * canvasHeight : 0
       void webviewRef.current
         .executeJavaScript(`(() => {
           const x = ${JSON.stringify(x)}
@@ -334,7 +367,7 @@ function ScreenOverlayInner({
           setFileError(message)
         })
     },
-    [editing, artifact, interactive, onUseElementAsContext, setFileError]
+    [canvasHeight, canvasWidth, editing, artifact, interactive, onUseElementAsContext, setFileError]
   )
 
   useEffect(() => {
@@ -414,8 +447,79 @@ function ScreenOverlayInner({
     []
   )
 
-  const titleBarHeight = Math.min(28, screenHeight * 0.06)
   const webviewUrl = fileUrl ? `${fileUrl}${fileUrl.includes('?') ? '&' : '?'}rev=${revision}` : ''
+
+  const measureContentSize = useCallback((): void => {
+    const wv = webviewRef.current
+    if (!artifact?.id || artifactKind !== 'html' || typeof wv?.executeJavaScript !== 'function') return
+    const allowAutoGrow =
+      artifact.node?.sizeMode !== 'manual' ||
+      artifact.previewStatus === 'pending' ||
+      parallelState?.status === 'queued' ||
+      parallelState?.status === 'running'
+    if (!allowAutoGrow) return
+    void wv
+      .executeJavaScript(CONTENT_SIZE_QUERY)
+      .then((value) => {
+        if (!value || typeof value !== 'object') return
+        const measured = value as { width?: unknown; height?: unknown }
+        if (typeof measured.height !== 'number' || !Number.isFinite(measured.height)) return
+        const store = useCanvasShapeStore.getState()
+        const current = store.document.objects[shape.id]
+        if (!current) return
+        const nextHeight = Math.min(
+          FRAME_AUTO_GROW_MAX_HEIGHT,
+          Math.max(current.height, Math.ceil(measured.height))
+        )
+        if (nextHeight <= current.height + FRAME_AUTO_GROW_THRESHOLD) return
+        store.updateShape(shape.id, { height: nextHeight }, true)
+        useDesignWorkspaceStore.getState().updateArtifactNode(artifact.id, {
+          x: Math.round(current.x),
+          y: Math.round(current.y),
+          width: Math.round(current.width),
+          height: nextHeight,
+          sizeMode: artifact.node?.sizeMode === 'manual' ? 'manual' : 'auto',
+          viewMode: artifact.node?.viewMode ?? 'preview'
+        })
+      })
+      .catch(() => undefined)
+  }, [
+    artifact?.id,
+    artifact?.node?.sizeMode,
+    artifact?.node?.viewMode,
+    artifact?.previewStatus,
+    artifactKind,
+    parallelState?.status,
+    shape.id
+  ])
+
+  const queueContentMeasurement = useCallback((): void => {
+    for (const timer of measurementTimersRef.current) window.clearTimeout(timer)
+    measurementTimersRef.current = [180, 700, 1400].map((delay) =>
+      window.setTimeout(measureContentSize, delay)
+    )
+  }, [measureContentSize])
+
+  useEffect(
+    () => () => {
+      for (const timer of measurementTimersRef.current) window.clearTimeout(timer)
+      measurementTimersRef.current = []
+    },
+    []
+  )
+
+  useEffect(() => {
+    if (!webviewUrl) return
+    const wv = webviewRef.current
+    if (!wv) return
+    wv.addEventListener('dom-ready', queueContentMeasurement)
+    wv.addEventListener('did-finish-load', queueContentMeasurement)
+    queueContentMeasurement()
+    return () => {
+      wv.removeEventListener('dom-ready', queueContentMeasurement)
+      wv.removeEventListener('did-finish-load', queueContentMeasurement)
+    }
+  }, [canvasHeight, canvasWidth, queueContentMeasurement, revision, webviewUrl])
 
   useEffect(() => {
     if (!webviewUrl || artifactKind !== 'html' || !artifact?.id || !artifactRelativePath) return
@@ -473,6 +577,9 @@ function ScreenOverlayInner({
   const qualityStatus = summarizeDesignHtmlQualityStatus(qualityFindings, qualityChecked)
   const qualityDetails = summarizeDesignHtmlQualityDetails(qualityFindings, qualityChecked)
   const qualityPanelWidth = Math.max(170, Math.min(300, screenWidth - 20))
+  const frameRadius = Math.min(7, Math.max(3, screenWidth * 0.012))
+  const chromeOffset = Math.min(28, Math.max(18, screenWidth * 0.045))
+  const showChrome = screenWidth > 92 && screenHeight > 42
   const QualityIcon =
     qualityStatus.kind === 'critical'
       ? AlertTriangle
@@ -484,261 +591,282 @@ function ScreenOverlayInner({
 
   return (
     <div
-      className="absolute overflow-hidden"
+      className="absolute overflow-visible"
       style={{
         left: screenX,
         top: screenY,
         width: screenWidth,
         height: screenHeight,
         pointerEvents: panning ? 'none' : active || interactive ? 'auto' : 'none',
-        borderRadius: Math.min(8, screenWidth * 0.01)
+        borderRadius: frameRadius
       }}
       onDoubleClick={handleDoubleClick}
     >
-      {/* Title bar */}
-      <div
-        className="flex items-center gap-1 border-b px-2 text-ds-muted"
-        style={{
-          height: titleBarHeight,
-          fontSize: Math.min(11, titleBarHeight * 0.42),
-          borderColor: active ? 'var(--ds-accent)' : 'var(--ds-border)',
-          backgroundColor: active
-            ? 'color-mix(in srgb, var(--ds-accent) 8%, white)'
-            : 'rgba(255,255,255,0.94)'
-        }}
-      >
-        <Monitor style={{ width: titleBarHeight * 0.45, height: titleBarHeight * 0.45 }} strokeWidth={1.8} />
-        <span className="min-w-0 flex-1 truncate font-medium">{shape.name}</span>
-        <span className="shrink-0 opacity-60">
-          {Math.round(shape.width)}x{Math.round(shape.height)}
-        </span>
-      </div>
-
-      {/* Content */}
-      <div style={{ height: screenHeight - titleBarHeight }} className="relative bg-white">
-        {webviewUrl ? (
-          <webview
-            key={webviewUrl}
-            ref={webviewRef as React.Ref<WebviewElement>}
-            src={webviewUrl}
-            partition="kun-proto"
-            webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
-            className="h-full w-full border-0"
-            style={{ pointerEvents: interactive ? 'auto' : 'none' }}
-          />
-        ) : (
-          <div className="flex h-full items-center justify-center text-ds-faint">
-            <div
-              className="flex flex-col items-center gap-2 text-center"
-              style={{ fontSize: Math.min(12, screenWidth * 0.028) }}
-            >
-              {drawingActive ? (
-                <Brush
-                  className="h-5 w-5 animate-pulse text-accent"
-                  strokeWidth={1.8}
-                  aria-hidden="true"
-                />
-              ) : null}
-              <span>
-                {previewError ||
-                  failedMessage ||
-                  (artifact ? (drawingActive ? drawingLabel : 'Generating...') : 'No content')}
-              </span>
-            </div>
+      {showChrome ? (
+        <div
+          className="pointer-events-none absolute left-0 right-0 z-20 flex items-center justify-between gap-2 text-[#7b8493] dark:text-[#9aa3b2]"
+          style={{
+            top: -chromeOffset,
+            height: chromeOffset - 4,
+            fontSize: Math.min(12, Math.max(10, screenWidth * 0.018))
+          }}
+        >
+          <div className="flex min-w-0 items-center gap-1.5">
+            <Monitor className="h-3.5 w-3.5 shrink-0" strokeWidth={1.7} />
+            <span className="min-w-0 truncate font-medium">{shape.name}</span>
           </div>
-        )}
-        {webviewUrl && drawingActive && !aiCursor ? (
-          <div className="pointer-events-none absolute inset-0">
-            <div className="absolute right-3 top-3 flex max-w-[70%] items-center gap-1.5 rounded-full border border-accent/30 bg-white/88 px-2.5 py-1.5 text-[11px] font-semibold text-accent shadow-[0_10px_30px_rgba(20,47,95,0.14)] backdrop-blur-md">
-              <Brush className="h-3.5 w-3.5 animate-pulse" strokeWidth={1.8} aria-hidden="true" />
-              <span className="min-w-0 truncate">{drawingLabel}</span>
-            </div>
-          </div>
-        ) : null}
-        {webviewUrl && failedMessage ? (
-          <div className="pointer-events-none absolute inset-x-3 top-3 rounded-md border border-red-300/70 bg-white/92 px-2.5 py-1.5 text-[11px] font-semibold text-red-600 shadow-sm">
-            {failedMessage}
-          </div>
-        ) : null}
-        {webviewUrl && active && !interactive && !drawingActive && !failedMessage && screenWidth > 190 ? (
-          <div className="pointer-events-none absolute left-2.5 top-2.5 z-20 flex flex-col items-start gap-1.5">
-            <button
-              type="button"
-              className={`pointer-events-auto flex max-w-[min(210px,60%)] items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[10.5px] font-semibold shadow-sm backdrop-blur-md transition hover:shadow-md ${qualityBadgeClasses(qualityStatus.kind)}`}
-              title={qualityStatus.title}
-              aria-expanded={qualityDetailsOpen}
-              onPointerDown={(e) => e.stopPropagation()}
-              onDoubleClick={(e) => e.stopPropagation()}
-              onClick={(e) => {
-                e.stopPropagation()
-                setQualityDetailsOpen((open) => !open)
-              }}
-            >
-              <QualityIcon className="h-3.5 w-3.5 shrink-0" strokeWidth={1.9} aria-hidden="true" />
-              <span className="min-w-0 truncate">{qualityStatus.label}</span>
-            </button>
-            {qualityDetailsOpen ? (
-              <div
-                className="pointer-events-auto rounded-md border border-ds-border bg-white/95 p-2.5 text-left text-[11px] leading-snug text-ds-ink shadow-[0_16px_40px_rgba(20,47,95,0.18)] backdrop-blur-md"
-                style={{ width: qualityPanelWidth }}
-                onPointerDown={(e) => e.stopPropagation()}
-                onDoubleClick={(e) => e.stopPropagation()}
-              >
-                <div className="flex items-start gap-2">
-                  <QualityIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={1.9} aria-hidden="true" />
-                  <div className="min-w-0">
-                    <div className="truncate text-[11.5px] font-semibold">{qualityDetails.heading}</div>
-                    <div className="mt-0.5 text-[10.5px] text-ds-muted">{qualityDetails.body}</div>
-                  </div>
+          {active && !interactive && !drawingActive && !failedMessage ? (
+            <div className="pointer-events-auto flex shrink-0 items-center gap-1.5">
+              {webviewUrl && screenWidth > 220 ? (
+                <div className="relative">
+                  <button
+                    type="button"
+                    className={`flex max-w-[180px] items-center gap-1.5 rounded-full border px-2 py-1 text-[10.5px] font-semibold shadow-sm backdrop-blur-md transition hover:shadow-md ${qualityBadgeClasses(qualityStatus.kind)}`}
+                    title={qualityStatus.title}
+                    aria-expanded={qualityDetailsOpen}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onDoubleClick={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setQualityDetailsOpen((open) => !open)
+                    }}
+                  >
+                    <QualityIcon className="h-3.5 w-3.5 shrink-0" strokeWidth={1.9} aria-hidden="true" />
+                    <span className="min-w-0 truncate">{qualityStatus.label}</span>
+                  </button>
+                  {qualityDetailsOpen ? (
+                    <div
+                      className="absolute right-0 top-full z-30 mt-1.5 rounded-md border border-ds-border bg-white/95 p-2.5 text-left text-[11px] leading-snug text-ds-ink shadow-[0_16px_40px_rgba(20,47,95,0.18)] backdrop-blur-md dark:bg-ds-card/95"
+                      style={{ width: qualityPanelWidth }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="flex items-start gap-2">
+                        <QualityIcon className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={1.9} aria-hidden="true" />
+                        <div className="min-w-0">
+                          <div className="truncate text-[11.5px] font-semibold">{qualityDetails.heading}</div>
+                          <div className="mt-0.5 text-[10.5px] text-ds-muted">{qualityDetails.body}</div>
+                        </div>
+                      </div>
+                      {qualityDetails.rows.length > 0 ? (
+                        <div className="mt-2 flex flex-col gap-1.5">
+                          {qualityDetails.rows.map((finding) => (
+                            <div
+                              key={`${finding.severity}-${finding.code}`}
+                              className="rounded-md border border-ds-border/80 bg-white/75 p-1.5 dark:bg-white/5"
+                            >
+                              <div className="flex min-w-0 items-center gap-1.5">
+                                <span
+                                  className={`shrink-0 rounded-full border px-1.5 py-0.5 text-[9.5px] font-semibold ${qualityFindingClasses(finding.severity)}`}
+                                >
+                                  {qualityFindingLabel(finding.severity)}
+                                </span>
+                                <span className="min-w-0 truncate text-[10.5px] font-semibold text-ds-ink">
+                                  {finding.code}
+                                </span>
+                              </div>
+                              <div className="mt-1 break-words text-[10.5px] font-medium text-ds-ink">
+                                {finding.message}
+                              </div>
+                              <div className="mt-0.5 break-words text-[10.5px] text-ds-muted">
+                                {finding.suggestion}
+                              </div>
+                            </div>
+                          ))}
+                          {qualityDetails.overflowCount > 0 ? (
+                            <div className="px-1 text-[10.5px] font-medium text-ds-muted">
+                              +{qualityDetails.overflowCount} more
+                            </div>
+                          ) : null}
+                          {artifact?.id && artifactRelativePath && onRequestQualityRepair ? (
+                            <button
+                              type="button"
+                              className="mt-0.5 inline-flex w-fit items-center gap-1.5 rounded-md border border-accent/30 bg-accent px-2 py-1 text-[10.5px] font-semibold text-white shadow-sm transition hover:opacity-90"
+                              onPointerDown={(e) => e.stopPropagation()}
+                              onDoubleClick={(e) => e.stopPropagation()}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                onRequestQualityRepair({
+                                  artifactId: artifact.id,
+                                  artifactRelativePath,
+                                  shapeId: shape.id,
+                                  findings: qualityFindings
+                                })
+                                setQualityDetailsOpen(false)
+                              }}
+                            >
+                              <Brush className="h-3 w-3" strokeWidth={1.9} aria-hidden="true" />
+                              Repair
+                            </button>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
-                {qualityDetails.rows.length > 0 ? (
-                  <div className="mt-2 flex flex-col gap-1.5">
-                    {qualityDetails.rows.map((finding) => (
-                      <div
-                        key={`${finding.severity}-${finding.code}`}
-                        className="rounded-md border border-ds-border/80 bg-white/75 p-1.5"
-                      >
-                        <div className="flex min-w-0 items-center gap-1.5">
-                          <span
-                            className={`shrink-0 rounded-full border px-1.5 py-0.5 text-[9.5px] font-semibold ${qualityFindingClasses(finding.severity)}`}
-                          >
-                            {qualityFindingLabel(finding.severity)}
-                          </span>
-                          <span className="min-w-0 truncate text-[10.5px] font-semibold text-ds-ink">
-                            {finding.code}
-                          </span>
-                        </div>
-                        <div className="mt-1 break-words text-[10.5px] font-medium text-ds-ink">
-                          {finding.message}
-                        </div>
-                        <div className="mt-0.5 break-words text-[10.5px] text-ds-muted">
-                          {finding.suggestion}
-                        </div>
-                      </div>
-                    ))}
-                    {qualityDetails.overflowCount > 0 ? (
-                      <div className="px-1 text-[10.5px] font-medium text-ds-muted">
-                        +{qualityDetails.overflowCount} more
-                      </div>
-                    ) : null}
-                    {artifact?.id && artifactRelativePath && onRequestQualityRepair ? (
-                      <button
-                        type="button"
-                        className="mt-0.5 inline-flex w-fit items-center gap-1.5 rounded-md border border-accent/30 bg-accent px-2 py-1 text-[10.5px] font-semibold text-white shadow-sm transition hover:opacity-90"
-                        onPointerDown={(e) => e.stopPropagation()}
-                        onDoubleClick={(e) => e.stopPropagation()}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          onRequestQualityRepair({
-                            artifactId: artifact.id,
-                            artifactRelativePath,
-                            shapeId: shape.id,
-                            findings: qualityFindings
-                          })
-                          setQualityDetailsOpen(false)
-                        }}
-                      >
-                        <Brush className="h-3 w-3" strokeWidth={1.9} aria-hidden="true" />
-                        Repair
-                      </button>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-        {webviewUrl && active && !interactive && !drawingActive && !failedMessage && screenWidth > 160 ? (
-          <div className="pointer-events-none absolute right-2.5 top-2.5 z-20 flex items-center gap-1.5">
-            {editing ? (
-              <span className="rounded-full border border-accent/30 bg-white/88 px-2 py-1 text-[10.5px] font-medium text-accent shadow-sm backdrop-blur-md">
-                点击文字进行修改
-              </span>
-            ) : null}
-            <button
-              type="button"
-              onPointerDown={(e) => e.stopPropagation()}
-              onDoubleClick={(e) => e.stopPropagation()}
-              onClick={(e) => {
-                e.stopPropagation()
-                onToggleModify(shape.id)
-              }}
-              title={editing ? '完成修改' : '修改内容'}
-              className={`pointer-events-auto inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-semibold shadow-[0_10px_30px_rgba(20,47,95,0.14)] backdrop-blur-md transition ${
-                editing
-                  ? 'border-accent bg-accent text-white hover:opacity-90'
-                  : 'border-ds-border bg-white/90 text-ds-ink hover:bg-white'
-              }`}
-            >
-              {editing ? (
-                <Check className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
-              ) : (
-                <PenLine className="h-3.5 w-3.5" strokeWidth={1.9} aria-hidden="true" />
-              )}
-              {editing ? '完成' : '修改'}
-            </button>
-          </div>
-        ) : null}
-        {webviewUrl && editing && !interactive ? (
-          <div
-            className="absolute inset-0 cursor-crosshair"
-            title="点击元素进行修改"
-            onPointerDown={selectElementAt}
-          />
-        ) : null}
-        {selectedElementRect && editing && !interactive ? (
-          <div
-            className="pointer-events-none absolute border border-accent bg-accent/10 shadow-[0_0_0_1px_rgba(255,255,255,0.75)]"
-            style={{
-              left: selectedElementRect.left,
-              top: selectedElementRect.top,
-              width: selectedElementRect.width,
-              height: selectedElementRect.height
-            }}
-          />
-        ) : null}
-        {aiCursor ? (
-          <div className="pointer-events-none absolute inset-0 overflow-hidden">
-            {/* Glow on the section the agent just wrote */}
-            <div
-              className="absolute rounded-[3px] border"
+              ) : null}
+              {webviewUrl && screenWidth > 170 ? (
+                <>
+                  {editing ? (
+                    <span className="rounded-full border border-accent/30 bg-white/88 px-2 py-1 text-[10.5px] font-medium text-accent shadow-sm backdrop-blur-md dark:bg-ds-card/88">
+                      点击文字进行修改
+                    </span>
+                  ) : null}
+                  <button
+                    type="button"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onDoubleClick={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onToggleModify(shape.id)
+                    }}
+                    title={editing ? '完成修改' : '修改内容'}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10.5px] font-semibold shadow-[0_10px_30px_rgba(20,47,95,0.12)] backdrop-blur-md transition ${
+                      editing
+                        ? 'border-accent bg-accent text-white hover:opacity-90'
+                        : 'border-ds-border bg-white/90 text-ds-ink hover:bg-white dark:bg-ds-card/88'
+                    }`}
+                  >
+                    {editing ? (
+                      <Check className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+                    ) : (
+                      <PenLine className="h-3.5 w-3.5" strokeWidth={1.9} aria-hidden="true" />
+                    )}
+                    {editing ? '完成' : '修改'}
+                  </button>
+                </>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div
+        className={`relative h-full w-full overflow-hidden border bg-white shadow-[0_12px_30px_rgba(15,23,42,0.10)] dark:bg-[#101214] ${
+          active
+            ? 'border-[#6557ff] shadow-[0_0_0_1px_rgba(101,87,255,0.45),0_16px_38px_rgba(15,23,42,0.14)]'
+            : 'border-black/10 dark:border-white/12'
+        }`}
+        style={{ borderRadius: frameRadius }}
+      >
+        <div
+          className="absolute left-0 top-0 overflow-hidden"
+          style={{
+            width: canvasWidth,
+            height: canvasHeight,
+            transform: `scale(${zoom})`,
+            transformOrigin: 'top left'
+          }}
+        >
+          {webviewUrl ? (
+            <webview
+              key={webviewUrl}
+              ref={webviewRef as React.Ref<WebviewElement>}
+              src={webviewUrl}
+              partition="kun-proto"
+              webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
+              className="block border-0"
               style={{
-                left: aiCursor.left,
-                top: aiCursor.top,
-                width: aiCursor.width,
-                height: aiCursor.height,
-                borderColor: 'color-mix(in srgb, var(--ds-accent) 75%, transparent)',
-                background: 'color-mix(in srgb, var(--ds-accent) 9%, transparent)',
-                boxShadow:
-                  '0 0 0 1px color-mix(in srgb, var(--ds-accent) 30%, transparent), 0 8px 26px color-mix(in srgb, var(--ds-accent) 22%, transparent)',
-                transition:
-                  'left 360ms cubic-bezier(0.22,1,0.36,1), top 360ms cubic-bezier(0.22,1,0.36,1), width 360ms ease, height 360ms ease'
+                width: canvasWidth,
+                height: canvasHeight,
+                pointerEvents: interactive ? 'auto' : 'none'
               }}
             />
-            {/* Animated AI cursor + label, clamped to stay visible */}
-            <div
-              className="absolute flex items-center gap-1"
-              style={{
-                left: Math.min(aiCursor.left + aiCursor.width - 8, screenWidth - 8),
-                top: Math.max(2, Math.min(aiCursor.top - 2, screenHeight - titleBarHeight - 22)),
-                transition:
-                  'left 360ms cubic-bezier(0.22,1,0.36,1), top 360ms cubic-bezier(0.22,1,0.36,1)'
-              }}
-            >
-              <MousePointer2
-                className="h-3.5 w-3.5 drop-shadow"
-                strokeWidth={1.6}
-                style={{ color: 'var(--ds-accent)', fill: 'var(--ds-accent)' }}
-              />
-              <span
-                className="max-w-[150px] truncate rounded-full px-1.5 py-0.5 text-[10px] font-medium text-white shadow"
-                style={{ background: 'var(--ds-accent)' }}
+          ) : (
+            <div className="flex h-full w-full items-center justify-center text-ds-faint">
+              <div
+                className="flex flex-col items-center gap-2 text-center"
+                style={{ fontSize: Math.min(16, Math.max(12, canvasWidth * 0.018)) }}
               >
-                {aiCursor.label || 'AI 正在生成…'}
-              </span>
+                {drawingActive ? (
+                  <Brush
+                    className="h-5 w-5 animate-pulse text-accent"
+                    strokeWidth={1.8}
+                    aria-hidden="true"
+                  />
+                ) : null}
+                <span>
+                  {previewError ||
+                    failedMessage ||
+                    (artifact ? (drawingActive ? drawingLabel : 'Generating...') : 'No content')}
+                </span>
+              </div>
             </div>
-          </div>
-        ) : null}
+          )}
+          {webviewUrl && drawingActive && !aiCursor ? (
+            <div className="pointer-events-none absolute inset-0">
+              <div className="absolute right-3 top-3 flex max-w-[70%] items-center gap-1.5 rounded-full border border-accent/30 bg-white/88 px-2.5 py-1.5 text-[11px] font-semibold text-accent shadow-[0_10px_30px_rgba(20,47,95,0.14)] backdrop-blur-md">
+                <Brush className="h-3.5 w-3.5 animate-pulse" strokeWidth={1.8} aria-hidden="true" />
+                <span className="min-w-0 truncate">{drawingLabel}</span>
+              </div>
+            </div>
+          ) : null}
+          {webviewUrl && failedMessage ? (
+            <div className="pointer-events-none absolute inset-x-3 top-3 rounded-md border border-red-300/70 bg-white/92 px-2.5 py-1.5 text-[11px] font-semibold text-red-600 shadow-sm">
+              {failedMessage}
+            </div>
+          ) : null}
+          {webviewUrl && editing && !interactive ? (
+            <div
+              className="absolute inset-0 cursor-crosshair"
+              title="点击元素进行修改"
+              onPointerDown={selectElementAt}
+            />
+          ) : null}
+          {selectedElementRect && editing && !interactive ? (
+            <div
+              className="pointer-events-none absolute border border-accent bg-accent/10 shadow-[0_0_0_1px_rgba(255,255,255,0.75)]"
+              style={{
+                left: selectedElementRect.left,
+                top: selectedElementRect.top,
+                width: selectedElementRect.width,
+                height: selectedElementRect.height
+              }}
+            />
+          ) : null}
+          {aiCursor ? (
+            <div className="pointer-events-none absolute inset-0 overflow-hidden">
+              {/* Glow on the section the agent just wrote */}
+              <div
+                className="absolute rounded-[3px] border"
+                style={{
+                  left: aiCursor.left,
+                  top: aiCursor.top,
+                  width: aiCursor.width,
+                  height: aiCursor.height,
+                  borderColor: 'color-mix(in srgb, var(--ds-accent) 75%, transparent)',
+                  background: 'color-mix(in srgb, var(--ds-accent) 9%, transparent)',
+                  boxShadow:
+                    '0 0 0 1px color-mix(in srgb, var(--ds-accent) 30%, transparent), 0 8px 26px color-mix(in srgb, var(--ds-accent) 22%, transparent)',
+                  transition:
+                    'left 360ms cubic-bezier(0.22,1,0.36,1), top 360ms cubic-bezier(0.22,1,0.36,1), width 360ms ease, height 360ms ease'
+                }}
+              />
+              {/* Animated AI cursor + label, clamped to stay visible */}
+              <div
+                className="absolute flex items-center gap-1"
+                style={{
+                  left: Math.min(aiCursor.left + aiCursor.width - 8, canvasWidth - 8),
+                  top: Math.max(2, Math.min(aiCursor.top - 2, canvasHeight - 22)),
+                  transition:
+                    'left 360ms cubic-bezier(0.22,1,0.36,1), top 360ms cubic-bezier(0.22,1,0.36,1)'
+                }}
+              >
+                <MousePointer2
+                  className="h-3.5 w-3.5 drop-shadow"
+                  strokeWidth={1.6}
+                  style={{ color: 'var(--ds-accent)', fill: 'var(--ds-accent)' }}
+                />
+                <span
+                  className="max-w-[150px] truncate rounded-full px-1.5 py-0.5 text-[10px] font-medium text-white shadow"
+                  style={{ background: 'var(--ds-accent)' }}
+                >
+                  {aiCursor.label || 'AI 正在生成…'}
+                </span>
+              </div>
+            </div>
+          ) : null}
+        </div>
       </div>
     </div>
   )
@@ -847,6 +975,7 @@ export function HtmlFrameOverlay({
             screenY={screenY}
             screenWidth={screenWidth}
             screenHeight={screenHeight}
+            zoom={zoom}
             active={active}
             interactive={interactiveId === shape.id}
             panning={panning}

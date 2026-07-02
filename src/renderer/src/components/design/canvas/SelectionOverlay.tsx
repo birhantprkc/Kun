@@ -20,11 +20,11 @@ import { useDesignAssistantStore } from '../../../design/design-assistant-store'
 import { filterEditableShapeIds } from '../../../design/canvas/canvas-editability'
 import { LinearPointEditor } from './LinearPointEditor'
 
-const HANDLE_SIZE = 8
+const HANDLE_SIZE = 7
 const ROTATE_HANDLE_SIZE = 20
 const ROTATE_HANDLE_OFFSET = 16
 const ROTATE_HANDLE_DOT_RADIUS = 5
-const SELECTION_COLOR = '#3b82f6'
+const SELECTION_COLOR = '#6557ff'
 
 type RotateCorner = 'nw' | 'ne' | 'se' | 'sw'
 const ROTATE_CORNERS: RotateCorner[] = ['nw', 'ne', 'se', 'sw']
@@ -62,11 +62,12 @@ function SelectionOverlayInner({
   viewBox: { x: number; y: number; width: number; height: number }
 }) {
   const { t } = useTranslation('common')
-  const sw = Math.max(1, 1 / zoom)
+  const sw = 1.25 / Math.max(zoom, 0.01)
   const hs = HANDLE_SIZE / zoom
   const rs = ROTATE_HANDLE_SIZE / zoom
   const ro = ROTATE_HANDLE_OFFSET / zoom
   const rr = ROTATE_HANDLE_DOT_RADIUS / zoom
+  const handleRadius = 1.5 / zoom
 
   const resizeStateRef = useRef<ResizeDragState | null>(null)
   const rotateStateRef = useRef<RotateDragState | null>(null)
@@ -327,7 +328,7 @@ function SelectionOverlayInner({
           fill="none"
           stroke={SELECTION_COLOR}
           strokeWidth={sw}
-          strokeOpacity={0.5}
+          strokeOpacity={0.42}
           pointerEvents="none"
         />
       )}
@@ -391,6 +392,7 @@ function SelectionOverlayInner({
             y={cy - hs / 2}
             width={hs}
             height={hs}
+            rx={handleRadius}
             fill="#ffffff"
             stroke={SELECTION_COLOR}
             strokeWidth={sw}

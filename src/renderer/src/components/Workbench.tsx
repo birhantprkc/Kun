@@ -83,7 +83,7 @@ import { buildImplementDesignPrompt } from '../design/design-implement-prompt'
 import { createDesignArtifactId, type DesignArtifact } from '../design/design-types'
 import { formatDesignSystemMarkdown, hashDesignSystem, mergeDesignContextWithTokens } from '../design/design-context'
 import { canImplementDesignArtifact } from '../design/design-artifact-actions'
-import { isHtmlFrame, type CanvasShape } from '../design/canvas/canvas-types'
+import { isHtmlFrame, type CanvasDocument, type CanvasShape } from '../design/canvas/canvas-types'
 import {
   ensureDesignBoardArtifact,
   findDesignBoardArtifact
@@ -108,7 +108,7 @@ import {
   resolveDesignComposerContextTargets
 } from '../design/design-composer-context'
 import type { DesignHtmlElementContext } from '../design/design-composer-context'
-import type { ScreenTurnOptions, ScreenManifestEntry } from '../design/design-turn-prompt'
+import type { DesignFrameContext, ScreenTurnOptions, ScreenManifestEntry } from '../design/design-turn-prompt'
 import { takeLastCanvasOpErrors } from '../design/canvas/apply-shape-ops'
 import { useDesignTokensStore } from '../design/design-tokens-store'
 import { SidebarTitlebarToggleButton } from './sidebar/SidebarPrimitives'
@@ -169,6 +169,35 @@ import {
 import { filesUnderDirectory, loadWorkspaceFileIndex } from '../lib/workspace-file-index'
 import { resolveWriteRuntimeBannerMessage } from '../lib/write-runtime-banner'
 import { shouldSuppressRuntimeErrorBanner } from '../lib/runtime-banner-visibility'
+
+function frameContextForHtmlArtifact(
+  artifactId: string,
+  canvasDocument: CanvasDocument,
+  artifacts: readonly DesignArtifact[]
+): DesignFrameContext | undefined {
+  const artifact = artifacts.find((item) => item.id === artifactId)
+  const frame = Object.values(canvasDocument.objects).find(
+    (shape): shape is CanvasShape => Boolean(shape) && isHtmlFrame(shape) && shape.htmlArtifactId === artifactId
+  )
+  const sizeMode = artifact?.node?.sizeMode
+  if (frame) {
+    return {
+      name: frame.name || artifact?.title,
+      width: frame.width,
+      height: frame.height,
+      ...(sizeMode ? { sizeMode } : {})
+    }
+  }
+  if (artifact?.node) {
+    return {
+      name: artifact.title,
+      width: artifact.node.width,
+      height: artifact.node.height,
+      ...(sizeMode ? { sizeMode } : {})
+    }
+  }
+  return undefined
+}
 
 const ChangeInspector = lazy(() =>
   import('./ChangeInspector').then((module) => ({ default: module.ChangeInspector }))
@@ -1900,6 +1929,7 @@ export function Workbench(): ReactElement {
       let designNotesPath = ''
       let htmlElementContext: DesignHtmlElementContext | undefined
       let selectedFrame: CanvasShape | null = null
+      let htmlFrameContext: DesignFrameContext | undefined
       let target: 'html' | 'canvas' | 'screen' = 'canvas'
 
       const canvasDoc = useCanvasShapeStore.getState().document
@@ -1921,7 +1951,14 @@ export function Workbench(): ReactElement {
       const visibleTargets = elementTarget ? [elementTarget, ...baseVisibleTargets] : baseVisibleTargets
       const primaryTarget = visibleTargets[0] ?? null
       const isScreenTarget = primaryTarget?.kind === 'html-screen-frame'
-      if (isScreenTarget) selectedFrame = primaryTarget.shape
+      if (isScreenTarget) {
+        selectedFrame = primaryTarget.shape
+        htmlFrameContext = frameContextForHtmlArtifact(
+          primaryTarget.artifact.id,
+          canvasDoc,
+          latestDesignState.artifacts
+        )
+      }
       const canvasSelectionIds =
         primaryTarget?.kind === 'canvas-selection'
           ? new Set(primaryTarget.selectedIds)
@@ -1950,6 +1987,7 @@ export function Workbench(): ReactElement {
         basePath = prep.basePath
         htmlArtifactId = prep.artifactId
         designNotesPath = prep.designMdPath
+        htmlFrameContext = frameContextForHtmlArtifact(prep.artifactId, canvasDoc, latestDesignState.artifacts)
         htmlElementContext = {
           ...primaryTarget.element,
           artifactRelativePath: prep.basePath ?? primaryTarget.artifact.relativePath
@@ -1966,6 +2004,7 @@ export function Workbench(): ReactElement {
         basePath = prep.basePath
         htmlArtifactId = prep.artifactId
         designNotesPath = prep.designMdPath
+        htmlFrameContext = frameContextForHtmlArtifact(prep.artifactId, canvasDoc, latestDesignState.artifacts)
         useDesignWorkspaceStore.getState().setDesignIntentMode('modify')
       } else if (primaryTarget?.kind === 'canvas-selection') {
         target = 'canvas'
@@ -2120,6 +2159,7 @@ export function Workbench(): ReactElement {
         designContext: mergeDesignContextWithTokens(promptState.designContext, derivedTokens),
         ...(contextLocations.length > 0 ? { contextLocations } : {}),
         ...(canvasSnapshot ? { canvasSnapshot } : {}),
+        ...(htmlFrameContext ? { frameContext: htmlFrameContext } : {}),
         ...(target === 'canvas' ? { previousOpErrors: takeLastCanvasOpErrors() } : {}),
         ...(derivedTokens ? { derivedTokens } : {}),
         ...(qualityFindings.length > 0 ? { qualityFindings } : {}),
@@ -2128,6 +2168,7 @@ export function Workbench(): ReactElement {
           screenName: selectedFrame.name,
           screenWidth: selectedFrame.width,
           screenHeight: selectedFrame.height,
+          ...(htmlFrameContext?.sizeMode ? { screenSizeMode: htmlFrameContext.sizeMode } : {}),
           screenManifest
         } as Partial<ScreenTurnOptions> : {})
       })
@@ -2140,6 +2181,7 @@ export function Workbench(): ReactElement {
         ...(model ? { model } : {}),
         ...(providerId ? { providerId } : {}),
         ...(reasoningEffort ? { reasoningEffort } : {}),
+        ...(target === 'canvas' ? { guiDesignCanvas: true } : {}),
         ...(attachmentIds.length ? { attachmentIds, attachments } : {})
       })
       if (sent) {

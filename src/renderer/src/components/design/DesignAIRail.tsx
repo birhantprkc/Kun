@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef, useState, type ReactElement } from 'react'
 import {
+  ArrowLeft,
   ChevronDown,
   Layers,
   Loader2,
@@ -14,7 +15,9 @@ import {
 import { useTranslation } from 'react-i18next'
 import { formatRelativeTime } from '../../lib/format-relative-time'
 import type { AttachmentReference, NormalizedThread, RuntimeConnectionStatus, ChatBlock } from '../../agent/types'
+import { getProvider } from '../../agent/registry'
 import type { QueuedUserMessage } from '../../store/chat-store-types'
+import { threadSnapshotLooksRunning } from '../../store/chat-store-runtime-helpers'
 import type { ModelProviderModelGroup } from '@shared/kun-gui-api'
 import { useDesignWorkspaceStore } from '../../design/design-workspace-store'
 import { cancelDesignPagesRun } from '../../design/design-pages-run'
@@ -117,6 +120,11 @@ function DesignAIRailInner({
   const [threadListOpen, setThreadListOpen] = useState(false)
   const threadListRef = useRef<HTMLDivElement | null>(null)
   const threadPillRef = useRef<HTMLButtonElement | null>(null)
+  const [childThreadId, setChildThreadId] = useState<string | null>(null)
+  const [childBlocks, setChildBlocks] = useState<ChatBlock[]>([])
+  const [childStatus, setChildStatus] = useState<string | undefined>(undefined)
+  const [childLoading, setChildLoading] = useState(false)
+  const [childError, setChildError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!threadListOpen) return
@@ -138,25 +146,79 @@ function DesignAIRailInner({
     }
   }, [threadListOpen])
 
+  useEffect(() => {
+    setChildThreadId(null)
+    setChildBlocks([])
+    setChildStatus(undefined)
+    setChildError(null)
+  }, [activeThreadId])
+
+  useEffect(() => {
+    if (!childThreadId) {
+      setChildBlocks([])
+      setChildStatus(undefined)
+      setChildError(null)
+      setChildLoading(false)
+      return
+    }
+    let cancelled = false
+    let pollTimer: number | null = null
+    setChildLoading(true)
+    setChildError(null)
+    const load = async (): Promise<void> => {
+      try {
+        const detail = await getProvider().getThreadDetail(childThreadId)
+        if (cancelled) return
+        setChildBlocks(detail.blocks)
+        setChildStatus(detail.threadStatus)
+        setChildError(null)
+        const shouldPoll = threadSnapshotLooksRunning(detail.blocks, detail.threadStatus)
+        if (shouldPoll) {
+          pollTimer = window.setTimeout(load, 1500)
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setChildError(error instanceof Error ? error.message : String(error))
+        }
+      } finally {
+        if (!cancelled) setChildLoading(false)
+      }
+    }
+    void load()
+    return () => {
+      cancelled = true
+      if (pollTimer !== null) window.clearTimeout(pollTimer)
+    }
+  }, [childThreadId])
+
 
   const activeThread = designThreads.find((th) => th.id === activeThreadId) ?? null
-  const headerTitle = activeThread?.title || t('designRailTitle')
+  const viewingChildThread = Boolean(childThreadId)
+  const headerTitle = viewingChildThread
+    ? t('subagentSessionBannerTitle')
+    : activeThread?.title || t('designRailTitle')
 
-  const hasTimeline =
-    blocks.length > 0 || liveReasoning.trim().length > 0 || liveAssistant.trim().length > 0
+  const timelineBlocks = viewingChildThread ? childBlocks : blocks
+  const timelineThreadId = viewingChildThread ? childThreadId : activeThreadId
+  const timelineLiveReasoning = viewingChildThread ? '' : liveReasoning
+  const timelineLiveAssistant = viewingChildThread ? '' : liveAssistant
+  const hasTimeline = viewingChildThread
+    ? childBlocks.length > 0
+    : blocks.length > 0 || liveReasoning.trim().length > 0 || liveAssistant.trim().length > 0
   const runActive = Boolean(pagesRun)
   const activeArtifact = artifacts.find((artifact) => artifact.id === activeArtifactId) ?? null
   const primaryContextChip = contextChips[0] ?? null
   // Keep the composer + new-conversation locked across the whole multi-page run,
   // even during the brief idle gaps between page turns.
   const effectiveBusy = busy || runActive
-  const canCreateConversation = runtimeConnection === 'ready' && !busy && !runActive
+  const canCreateConversation = runtimeConnection === 'ready' && !busy && !runActive && !viewingChildThread
   const showMultiPageToggle =
     designIntentMode === 'generate' && !runActive && activeArtifact?.kind !== 'canvas'
   const contextLabel = primaryContextChip
     ? `${designIntentMode === 'preview' ? t('designProjectPreview') : t('designProjectModify')} · ${primaryContextChip.label}`
     : ''
-  const showContextControls = runActive || Boolean(primaryContextChip) || showMultiPageToggle
+  const showContextControls =
+    !viewingChildThread && (runActive || Boolean(primaryContextChip) || showMultiPageToggle)
 
   const openAssistant = (): void => {
     if (isNarrowViewport()) {
@@ -172,6 +234,19 @@ function DesignAIRailInner({
       return
     }
     setAssistantOpen(false)
+  }
+
+  const openChildThread = (threadId: string): void => {
+    setThreadListOpen(false)
+    setChildThreadId(threadId)
+    openAssistant()
+  }
+
+  const closeChildThread = (): void => {
+    setChildThreadId(null)
+    setChildBlocks([])
+    setChildStatus(undefined)
+    setChildError(null)
   }
 
   const panelVisibility = `${narrowPanelOpen ? 'flex' : 'hidden'} ${
@@ -217,20 +292,25 @@ function DesignAIRailInner({
             <button
               ref={threadPillRef}
               type="button"
-              onClick={() => setThreadListOpen((v) => !v)}
+              onClick={() => {
+                if (viewingChildThread) return
+                setThreadListOpen((v) => !v)
+              }}
               className="flex min-w-0 flex-1 items-center gap-2 rounded-full bg-ds-subtle px-3 py-2 transition hover:bg-ds-hover dark:bg-white/[0.08] dark:hover:bg-white/[0.12]"
-              title={t('designRailSwitchThread')}
-              aria-label={t('designRailSwitchThread')}
+              title={viewingChildThread ? t('subagentSessionBannerTitle') : t('designRailSwitchThread')}
+              aria-label={viewingChildThread ? t('subagentSessionBannerTitle') : t('designRailSwitchThread')}
             >
               <Sparkles className="h-4 w-4 shrink-0 text-accent" strokeWidth={1.8} />
               <span className="min-w-0 truncate text-[13px] font-semibold text-ds-ink">
                 {headerTitle}
               </span>
-              <ChevronDown
-                className="ml-auto h-3 w-3 shrink-0 text-ds-faint transition-transform"
-                style={threadListOpen ? { transform: 'rotate(180deg)' } : undefined}
-                strokeWidth={2}
-              />
+              {!viewingChildThread ? (
+                <ChevronDown
+                  className="ml-auto h-3 w-3 shrink-0 text-ds-faint transition-transform"
+                  style={threadListOpen ? { transform: 'rotate(180deg)' } : undefined}
+                  strokeWidth={2}
+                />
+              ) : null}
             </button>
             <button
               type="button"
@@ -245,7 +325,7 @@ function DesignAIRailInner({
           </div>
         </div>
 
-        {threadListOpen ? (
+        {threadListOpen && !viewingChildThread ? (
           <div
             ref={threadListRef}
             className="absolute left-2 right-2 top-[58px] z-[60] max-h-[280px] overflow-y-auto rounded-2xl border border-ds-border bg-white p-1.5 shadow-[0_14px_34px_rgba(20,47,95,0.16)] dark:bg-ds-card"
@@ -294,19 +374,52 @@ function DesignAIRailInner({
         ) : null}
 
         <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-white/36 dark:bg-transparent">
-          {hasTimeline ? (
+          {viewingChildThread ? (
+            <div className="sticky top-0 z-20 border-b border-ds-border-muted/80 bg-white/88 px-4 py-3 backdrop-blur-xl dark:bg-ds-card/88">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={closeChildThread}
+                  className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-ds-border bg-white px-2.5 text-[12px] font-semibold text-ds-muted shadow-sm transition hover:bg-ds-hover hover:text-ds-ink dark:bg-white/8"
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" strokeWidth={1.9} />
+                  {t('designRailChildBack', '返回设计主会话')}
+                </button>
+                <div className="min-w-0 flex-1 text-right">
+                  <div className="truncate text-[12.5px] font-semibold text-ds-ink">
+                    {t('subagentSessionBannerTitle')}
+                  </div>
+                  <div className="truncate text-[10.5px] text-ds-faint">
+                    {childLoading ? t('designRailChildLoading', '加载子代理输出中…') : childStatus || childThreadId}
+                  </div>
+                </div>
+              </div>
+              {childError ? (
+                <div className="mt-2 rounded-lg border border-red-200 bg-red-50/80 px-2.5 py-2 text-[12px] leading-5 text-red-700">
+                  {t('designRailChildError', '子代理会话加载失败')}: {childError}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {viewingChildThread && childLoading && childBlocks.length === 0 ? (
+            <div className="flex h-40 items-center justify-center gap-2 text-[12.5px] font-medium text-ds-muted">
+              <Loader2 className="h-4 w-4 animate-spin text-accent" strokeWidth={2} />
+              {t('designRailChildLoading')}
+            </div>
+          ) : hasTimeline ? (
             <MessageTimeline
-              blocks={blocks}
-              liveReasoning={liveReasoning}
-              live={liveAssistant}
-              activeThreadId={activeThreadId}
+              blocks={timelineBlocks}
+              liveReasoning={timelineLiveReasoning}
+              live={timelineLiveAssistant}
+              activeThreadId={timelineThreadId}
               runtimeConnection={runtimeConnection}
               onRetryConnection={onRetryConnection}
               onOpenSettings={() => onOpenSettings('agents')}
               onSelectSuggestion={(text) => setInput(text)}
+              onOpenChildThread={openChildThread}
               compactCards
             />
-          ) : (
+          ) : !viewingChildThread ? (
             <div className="flex h-full items-center justify-center px-7 text-center">
               <div className="max-w-[260px]">
                 <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-[18px] border border-ds-border-muted bg-white/70 text-accent shadow-sm dark:bg-white/8">
@@ -317,7 +430,7 @@ function DesignAIRailInner({
                 </p>
               </div>
             </div>
-          )}
+          ) : null}
         </div>
       </aside>
 
@@ -391,40 +504,56 @@ function DesignAIRailInner({
             )}
           </div>
         ) : null}
-        <DesignQuickSuggestions input={input} setInput={setInput} />
+        {viewingChildThread ? (
+          <div className="mx-auto flex w-fit items-center gap-2 rounded-full border border-ds-border bg-white/90 px-3 py-2 text-[12.5px] font-semibold text-ds-muted shadow-[0_12px_34px_rgba(20,47,95,0.12)] backdrop-blur-xl dark:bg-ds-card/90">
+            <span>{t('subagentSessionBannerTitle')}</span>
+            <button
+              type="button"
+              onClick={closeChildThread}
+              className="inline-flex h-6 items-center gap-1 rounded-full px-2 text-[11.5px] text-accent transition hover:bg-accent/10"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" strokeWidth={1.9} />
+              {t('designRailChildBack', '返回设计主会话')}
+            </button>
+          </div>
+        ) : (
+          <>
+            <DesignQuickSuggestions input={input} setInput={setInput} />
 
-        <FloatingComposer
-          variant="compact"
-          input={input}
-          setInput={setInput}
-          mode={mode}
-          setMode={setMode}
-          busy={effectiveBusy}
-          runtimeReady={runtimeConnection === 'ready'}
-          hasActiveThread={Boolean(activeThreadId)}
-          composerModel={composerModel}
-          composerProviderId={composerProviderId}
-          composerPickList={composerPickList}
-          composerModelGroups={composerModelGroups}
-          composerReasoningEffort={composerReasoningEffort}
-          onComposerModelChange={setComposerModel}
-          onComposerReasoningEffortChange={setComposerReasoningEffort}
-          modelPickerMode="combobox"
-          queuedMessages={queuedMessages}
-          onRemoveQueuedMessage={removeQueuedMessage}
-          attachments={attachments}
-          attachmentUploadEnabled={attachmentUploadEnabled}
-          attachmentUploadBusy={attachmentUploadBusy}
-          attachmentUploadError={attachmentUploadError}
-          contextChips={contextChips}
-          onPickAttachments={onPickAttachments}
-          onPasteClipboardImage={onPasteClipboardImage}
-          onRemoveAttachment={onRemoveAttachment}
-          onRemoveContextChip={onRemoveContextChip}
-          onSend={() => { openAssistant(); onSend() }}
-          onInterrupt={onInterrupt}
-          onConfigureProviders={onConfigureProviders}
-        />
+            <FloatingComposer
+              variant="compact"
+              input={input}
+              setInput={setInput}
+              mode={mode}
+              setMode={setMode}
+              busy={effectiveBusy}
+              runtimeReady={runtimeConnection === 'ready'}
+              hasActiveThread={Boolean(activeThreadId)}
+              composerModel={composerModel}
+              composerProviderId={composerProviderId}
+              composerPickList={composerPickList}
+              composerModelGroups={composerModelGroups}
+              composerReasoningEffort={composerReasoningEffort}
+              onComposerModelChange={setComposerModel}
+              onComposerReasoningEffortChange={setComposerReasoningEffort}
+              modelPickerMode="combobox"
+              queuedMessages={queuedMessages}
+              onRemoveQueuedMessage={removeQueuedMessage}
+              attachments={attachments}
+              attachmentUploadEnabled={attachmentUploadEnabled}
+              attachmentUploadBusy={attachmentUploadBusy}
+              attachmentUploadError={attachmentUploadError}
+              contextChips={contextChips}
+              onPickAttachments={onPickAttachments}
+              onPasteClipboardImage={onPasteClipboardImage}
+              onRemoveAttachment={onRemoveAttachment}
+              onRemoveContextChip={onRemoveContextChip}
+              onSend={() => { openAssistant(); onSend() }}
+              onInterrupt={onInterrupt}
+              onConfigureProviders={onConfigureProviders}
+            />
+          </>
+        )}
       </div>
     </div>
   )

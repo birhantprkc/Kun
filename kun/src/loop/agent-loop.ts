@@ -1439,6 +1439,7 @@ export class AgentLoop {
       workspace: thread?.workspace ?? '',
       threadMode: effectiveMode,
       ...(activePlanContext ? { guiPlan: activePlanContext } : {}),
+      ...(turn?.guiDesignCanvas ? { guiDesignCanvas: true } : {}),
       model: modelCapabilities,
       activeSkillIds: skillResolution.activeSkillIds,
       memoryPolicy: { enabled: Boolean(this.opts.memoryStore) },
@@ -1470,6 +1471,7 @@ export class AgentLoop {
       activeSkillIds: skillResolution.activeSkillIds,
       allowedToolNames,
       userInputDisabled,
+      guiDesignCanvas: turn?.guiDesignCanvas === true,
       fingerprint: toolCatalog.fingerprint,
       toolNames: toolCatalog.toolNames,
       toolHashes: toolCatalog.toolHashes
@@ -1915,6 +1917,7 @@ export class AgentLoop {
             workspace: thread?.workspace ?? '',
             threadMode: effectiveMode,
             activePlanContext,
+            guiDesignCanvas: turn?.guiDesignCanvas === true,
             modelCapabilities,
             activeSkillIds: skillResolution.activeSkillIds,
             allowedToolNames,
@@ -2082,6 +2085,7 @@ export class AgentLoop {
       workspace: thread?.workspace ?? '',
       threadMode: effectiveMode,
       activePlanContext,
+      guiDesignCanvas: turn?.guiDesignCanvas === true,
       modelCapabilities,
       activeSkillIds: skillResolution.activeSkillIds,
       allowedToolNames,
@@ -2103,6 +2107,7 @@ export class AgentLoop {
     workspace: string
     threadMode?: 'agent' | 'plan'
     activePlanContext?: GuiPlanContext
+    guiDesignCanvas?: boolean
     modelCapabilities: ModelCapabilityMetadata
     activeSkillIds: readonly string[]
     allowedToolNames?: readonly string[]
@@ -2244,6 +2249,7 @@ export class AgentLoop {
     workspace: string
     threadMode?: 'agent' | 'plan'
     activePlanContext?: GuiPlanContext
+    guiDesignCanvas?: boolean
     modelCapabilities: ModelCapabilityMetadata
     activeSkillIds: readonly string[]
     allowedToolNames?: readonly string[]
@@ -2258,6 +2264,7 @@ export class AgentLoop {
       workspace: input.workspace,
       threadMode: input.threadMode,
       ...(input.activePlanContext ? { guiPlan: input.activePlanContext } : {}),
+      ...(input.guiDesignCanvas ? { guiDesignCanvas: true } : {}),
       model: input.modelCapabilities,
       activeSkillIds: input.activeSkillIds,
       memoryPolicy: { enabled: Boolean(this.opts.memoryStore) },
@@ -2867,6 +2874,7 @@ export class AgentLoop {
     activeSkillIds: readonly string[]
     allowedToolNames?: readonly string[]
     userInputDisabled?: boolean
+    guiDesignCanvas?: boolean
     fingerprint: string
     toolNames: string[]
     toolHashes: Record<string, string>
@@ -2878,7 +2886,8 @@ export class AgentLoop {
       model: input.model,
       activeSkillIds: [...input.activeSkillIds].sort(),
       allowedToolNames: input.allowedToolNames ? [...input.allowedToolNames].sort() : [],
-      userInputDisabled: input.userInputDisabled === true
+      userInputDisabled: input.userInputDisabled === true,
+      guiDesignCanvas: input.guiDesignCanvas === true
     })
     const current: ToolCatalogSnapshot = {
       fingerprint: input.fingerprint,

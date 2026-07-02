@@ -7,8 +7,17 @@
  *
  * The id is still included so the AI can target shapes precisely in ShapeOps.
  */
-import { fillColor, isImplicitImageSlot, shapeGeometry } from './canvas-types'
+import {
+  fillColor,
+  isHtmlFrame,
+  isImplicitImageSlot,
+  shapeGeometry
+} from './canvas-types'
 import type { CanvasDocument, CanvasShape, Point, Rect } from './canvas-types'
+import {
+  getCanvasDocumentContentBounds,
+  placeRectInViewportAvoiding
+} from './canvas-placement'
 
 export type CanvasSnapshotShape = {
   id: string
@@ -69,6 +78,9 @@ export type CanvasSnapshotShape = {
 }
 
 const SNAPSHOT_MAX_POINTS_PER_SHAPE = 48
+const SNAPSHOT_DEFAULT_SCREEN_WIDTH = 1280
+const SNAPSHOT_DEFAULT_SCREEN_HEIGHT = 800
+const SNAPSHOT_RECOMMENDED_SLOT_COUNT = 3
 
 /**
  * Compact, token-cheap style summary: only the primary visible fill/stroke plus
@@ -137,8 +149,41 @@ function sampledAbsolutePoints(shape: CanvasShape): Pick<CanvasSnapshotShape, 'p
 export type CanvasSnapshot = {
   shapeCount: number
   shapes: CanvasSnapshotShape[]
+  /**
+   * Whiteboard placement guide for screen creation: the current viewport, whole
+   * board bounds, occupied HTML frames and safe suggested slots for new screens.
+   */
+  placement?: CanvasPlacementGuide
   /** When `maxShapes` truncated the result, how many shapes were dropped. */
   omitted?: number
+}
+
+export type CanvasPlacementRect = {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+export type CanvasPlacementFrame = CanvasPlacementRect & {
+  id: string
+  name: string
+  htmlArtifactId?: string
+}
+
+export type CanvasPlacementSlot = CanvasPlacementRect & {
+  label: string
+  reason: string
+}
+
+export type CanvasPlacementGuide = {
+  empty: boolean
+  viewBox?: CanvasPlacementRect
+  contentBounds?: CanvasPlacementRect
+  selectedBounds?: CanvasPlacementRect
+  occupiedFrames: CanvasPlacementFrame[]
+  defaultScreen: { w: number; h: number }
+  recommendedSlots: CanvasPlacementSlot[]
 }
 
 /**
@@ -230,9 +275,81 @@ export function snapshotCanvas(
       .sort((a, b) => snapshotPriority(a.shape) - snapshotPriority(b.shape) || a.index - b.index)
       .slice(0, max)
       .map((entry) => entry.shape)
-    return { shapeCount: shapes.length, shapes: prioritized, omitted }
+    return {
+      shapeCount: shapes.length,
+      shapes: prioritized,
+      ...(viewBox ? { placement: buildPlacementGuide(doc, selectedIds, viewBox) } : {}),
+      omitted
+    }
   }
-  return { shapeCount: shapes.length, shapes }
+  return {
+    shapeCount: shapes.length,
+    shapes,
+    ...(viewBox ? { placement: buildPlacementGuide(doc, selectedIds, viewBox) } : {})
+  }
+}
+
+function buildPlacementGuide(
+  doc: CanvasDocument,
+  selectedIds: ReadonlySet<string> | undefined,
+  viewBox: Rect
+): CanvasPlacementGuide {
+  const occupiedFrames = Object.values(doc.objects)
+    .filter((shape): shape is CanvasShape => Boolean(shape) && shape.visible !== false && isHtmlFrame(shape))
+    .map((shape) => ({
+      id: shape.id,
+      name: shape.name,
+      ...(shape.htmlArtifactId ? { htmlArtifactId: shape.htmlArtifactId } : {}),
+      ...compactRect(shapeGeometry(shape).selrect)
+    }))
+    .sort((a, b) => a.y - b.y || a.x - b.x || a.name.localeCompare(b.name))
+  const occupiedRects = occupiedFrames.map(expandPlacementRect)
+  const recommendedSlots: CanvasPlacementSlot[] = []
+  for (let index = 0; index < SNAPSHOT_RECOMMENDED_SLOT_COUNT; index += 1) {
+    const rect = placeRectInViewportAvoiding(
+      { width: SNAPSHOT_DEFAULT_SCREEN_WIDTH, height: SNAPSHOT_DEFAULT_SCREEN_HEIGHT },
+      viewBox,
+      [...occupiedRects, ...recommendedSlots.map(expandPlacementRect)]
+    )
+    recommendedSlots.push({
+      label: index === 0 ? 'next' : `next-${index + 1}`,
+      reason: index === 0
+        ? 'Best empty slot near the current viewport.'
+        : 'Alternative empty slot if creating multiple screens.',
+      ...compactRect(rect)
+    })
+  }
+  const rawSelectedBounds = selectedIds && selectedIds.size > 0
+    ? selectionBounds(doc.objects, selectedIds, 0)
+    : null
+  const contentBounds = getCanvasDocumentContentBounds(doc)
+  return {
+    empty: occupiedFrames.length === 0 && !contentBounds,
+    viewBox: compactRect(viewBox),
+    ...(contentBounds ? { contentBounds: compactRect(contentBounds) } : {}),
+    ...(rawSelectedBounds ? { selectedBounds: compactRect(rawSelectedBounds) } : {}),
+    occupiedFrames,
+    defaultScreen: { w: SNAPSHOT_DEFAULT_SCREEN_WIDTH, h: SNAPSHOT_DEFAULT_SCREEN_HEIGHT },
+    recommendedSlots
+  }
+}
+
+function compactRect(rect: Rect): CanvasPlacementRect {
+  return {
+    x: round(rect.x),
+    y: round(rect.y),
+    w: round(rect.width),
+    h: round(rect.height)
+  }
+}
+
+function expandPlacementRect(rect: CanvasPlacementRect): Rect {
+  return {
+    x: rect.x,
+    y: rect.y,
+    width: rect.w,
+    height: rect.h
+  }
 }
 
 function selectionBounds(

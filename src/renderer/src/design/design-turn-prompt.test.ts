@@ -7,7 +7,7 @@ import {
 } from './design-turn-prompt'
 import type { ScreenTurnOptions } from './design-turn-prompt'
 import { snapshotCanvas } from './canvas/canvas-snapshot'
-import { createDefaultShape, createEmptyDocument } from './canvas/canvas-types'
+import { createDefaultShape, createEmptyDocument, createHtmlFrameShape } from './canvas/canvas-types'
 import { setLastLintFindings } from './canvas/design-lint'
 
 describe('design turn prompt', () => {
@@ -102,6 +102,7 @@ describe('design turn prompt', () => {
       screenName: 'Login',
       screenWidth: 420,
       screenHeight: 340,
+      screenSizeMode: 'manual',
       screenManifest: [
         {
           name: 'Home',
@@ -114,12 +115,38 @@ describe('design turn prompt', () => {
     const prompt = buildDesignTurnPrompt(options)
 
     expect(prompt).toContain('Selected screen frame: 420x340 canvas pixels.')
+    expect(prompt).toContain('Canvas frame context: "Login"')
+    expect(prompt).toContain('420x340 canvas pixels, sizeMode: manual')
+    expect(prompt).toContain('Treat the selected frame size above as the real webview viewport')
     expect(prompt).toContain('Design notes file: .kun-design/screen/DESIGN.md')
     expect(prompt).toContain('Modify ONLY `.kun-design/screen/v2.html` and `.kun-design/screen/DESIGN.md`')
     expect(prompt).toContain('responsive to arbitrary selected frame sizes')
     expect(prompt).toContain('arbitrary resized frame sizes')
     expect(prompt).toContain('"Home" (1280x720)')
     expect(prompt).toContain('.kun-design/home/v1.html')
+  })
+
+  it('injects real frame dimensions into HTML iteration prompts', () => {
+    const prompt = buildDesignTurnPrompt({
+      target: 'html',
+      mode: 'text',
+      text: 'Continue the design system page',
+      artifactRelativePath: '.kun-design/system/v2.html',
+      designNotesPath: '.kun-design/system/DESIGN.md',
+      basePath: '.kun-design/system/v1.html',
+      workspaceRoot: '/workspace',
+      frameContext: {
+        name: 'Design system',
+        width: 1330,
+        height: 1040,
+        sizeMode: 'auto'
+      }
+    })
+
+    expect(prompt).toContain('Canvas frame context: "Design system"')
+    expect(prompt).toContain('1330x1040 canvas pixels, sizeMode: auto')
+    expect(prompt).toContain('real webview viewport')
+    expect(prompt).toContain('do not shrink the design')
   })
 
   it('includes sibling pages so HTML turns stay cohesive across the canvas', () => {
@@ -464,9 +491,37 @@ describe('design turn prompt', () => {
   it('canvas turn prompt frames screen creation as a design_canvas tool call', () => {
     const prompt = buildCodeCanvasTurnPrompt({ workspaceRoot: '/ws' })
     expect(prompt).toContain('calling the `design_canvas` tool')
-    expect(prompt).toContain('Do not ask the user to manually create a canvas first')
+    expect(prompt).toContain('do not ask the user to manually create a canvas first')
     expect(prompt).toContain('{ "action": "add_screen"')
-    expect(prompt).toContain('```design_canvas')
+    expect(prompt).toContain('call the real `design_canvas` tool')
+    expect(prompt).not.toContain('```design_canvas')
+  })
+
+  it('includes placement guidance for new screen coordinates', () => {
+    const doc = createEmptyDocument()
+    const root = doc.objects[doc.rootId]
+    const frame = createHtmlFrameShape('Home', 1160, 600, 'home', 'desktop')
+    doc.objects[frame.id] = { ...frame, parentId: doc.rootId }
+    doc.objects[doc.rootId] = { ...root, children: [frame.id] }
+    const canvasSnapshot = snapshotCanvas(doc, new Set(), {
+      viewBox: { x: 1000, y: 500, width: 1600, height: 1000 }
+    })
+
+    const prompt = buildDesignTurnPrompt({
+      target: 'canvas',
+      mode: 'text',
+      text: 'Add settings page',
+      artifactRelativePath: '.kun-design/board/canvas.json',
+      workspaceRoot: '/workspace',
+      canvasSnapshot
+    })
+
+    expect(prompt).toContain('The snapshot includes `placement`')
+    expect(prompt).toContain('prefer omitting `x`/`y`')
+    expect(prompt).toContain('placement.recommendedSlots')
+    expect(prompt).toContain('"recommendedSlots"')
+    expect(prompt).toContain('"occupiedFrames"')
+    expect(prompt).toContain('"x": 2520')
   })
 
   it('canvas turn prompt keeps empty holder rule intact (no imageUrl leaked, reference rule still gated)', () => {

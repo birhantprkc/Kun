@@ -101,6 +101,41 @@ function displayCodeLanguage(language: string): string {
   return isPlainTextLanguage(language) ? 'plain text' : language
 }
 
+function canvasOpsJsonCount(code: string): number | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(code)
+  } catch {
+    return null
+  }
+
+  const countValue = (value: unknown): number | null => {
+    if (Array.isArray(value)) {
+      if (value.length === 0) return null
+      if (value.every((item) => isRecord(item) && typeof item.op === 'string')) {
+        return value.length
+      }
+      let total = 0
+      for (const item of value) {
+        const count = countValue(item)
+        if (count !== null) total += count
+      }
+      return total > 0 ? total : null
+    }
+    if (!isRecord(value)) return null
+    if (typeof value.op === 'string') return 1
+    const action = typeof value.action === 'string' ? value.action : ''
+    if (action === 'add_screen' || action === 'update_shapes' || action === 'create_board') return 1
+    return null
+  }
+
+  return countValue(parsed)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
 function inlineFileReference(text: string): { text: string; target: FileReferenceTarget } | null {
   const trimmed = text.trim()
   if (!trimmed) return null
@@ -352,6 +387,10 @@ function CodeComponent({ node, className, children, ...props }: CodeProps) {
     return <CanvasOpsChip code={text} language={language} />
   }
 
+  if (language === 'json' && canvasOpsJsonCount(text) !== null) {
+    return <CanvasOpsChip code={text} language="design_canvas" />
+  }
+
   if (isPlainTextLanguage(language) && !text.replace(TRAILING_NEWLINES_REGEX, '').trim()) {
     return null
   }
@@ -373,15 +412,9 @@ function CanvasOpsChip({
   const { t } = useTranslation('common')
   const [expanded, setExpanded] = useState(false)
   const count = useMemo(() => {
+    if (language === 'design_canvas') return canvasOpsJsonCount(code)
     try {
       const parsed = JSON.parse(code)
-      if (language === 'design_canvas') {
-        if (Array.isArray(parsed)) return parsed.length
-        if (parsed && typeof parsed === 'object' && typeof parsed.action === 'string') {
-          return 1
-        }
-        return 1
-      }
       return Array.isArray(parsed) ? parsed.length : 1
     } catch {
       return null

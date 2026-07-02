@@ -5,6 +5,7 @@ import {
   extractCanvasOpBlocks,
   applyCanvasOpsSince,
   applyShapeOpsFromText,
+  extractCanvasOpBlocksFromValue,
   setLastCanvasOpErrors,
   takeLastCanvasOpErrors
 } from './apply-shape-ops'
@@ -175,10 +176,60 @@ describe('extractCanvasOpBlocks (source-ordered)', () => {
     ])
   })
 
+  it('accepts recognized design_canvas tool calls emitted under a json fence', () => {
+    const text = [
+      '```json',
+      '{ "action": "add_screen", "name": "Home", "devicePreset": "mobile" }',
+      '```'
+    ].join('\n')
+    expect(extractCanvasOpBlocks(text)).toEqual([
+      [{ op: 'add-screen', name: 'Home', devicePreset: 'mobile' }]
+    ])
+  })
+
+  it('ignores unrelated json fenced blocks', () => {
+    const text = [
+      '```json',
+      '{ "name": "Home", "items": [{ "title": "Feed" }] }',
+      '```'
+    ].join('\n')
+    expect(extractCanvasOpBlocks(text)).toEqual([])
+  })
+
+  it('accepts direct shape ops emitted under a json fence', () => {
+    const text = [
+      '```json',
+      '{ "op": "delete", "id": "stale" }',
+      '```'
+    ].join('\n')
+    expect(extractCanvasOpBlocks(text)).toEqual([[{ op: 'delete', id: 'stale' }]])
+  })
+
   it('omits an incomplete (unclosed) block until its fence closes', () => {
     const partial =
       '```design_canvas\n{ "action": "update_shapes", "ops": [{ "op": "add", "shape": { "type": "rect" } }] }'
     expect(extractCanvasOpBlocks(partial)).toEqual([])
+  })
+})
+
+describe('extractCanvasOpBlocksFromValue (tool result payloads)', () => {
+  it('extracts ops from a design_canvas tool result', () => {
+    expect(
+      extractCanvasOpBlocksFromValue({
+        ok: true,
+        action: 'add_screen',
+        ops: [{ op: 'add-screen', name: 'Home' }]
+      })
+    ).toEqual([[{ op: 'add-screen', name: 'Home' }]])
+  })
+
+  it('falls back to direct design_canvas tool-call normalization', () => {
+    expect(
+      extractCanvasOpBlocksFromValue({
+        action: 'add_screen',
+        name: 'Home'
+      })
+    ).toEqual([[{ op: 'add-screen', name: 'Home' }]])
   })
 })
 

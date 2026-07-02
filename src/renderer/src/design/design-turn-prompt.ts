@@ -42,6 +42,13 @@ export function formatDerivedTokenLines(tokens: DerivedTokens | undefined): stri
 
 export type DesignTurnTarget = 'html' | 'canvas' | 'screen'
 
+export type DesignFrameContext = {
+  name?: string
+  width: number
+  height: number
+  sizeMode?: 'auto' | 'manual'
+}
+
 export type DesignTurnOptions = {
   target: DesignTurnTarget
   mode: 'text' | 'image'
@@ -61,6 +68,12 @@ export type DesignTurnOptions = {
   designContext?: DesignContext
   /** Canvas mode only: current snapshot of the shape document for AI reasoning. */
   canvasSnapshot?: CanvasSnapshot
+  /**
+   * Real canvas frame that hosts this HTML artifact. The generated page's
+   * viewport must match this size, so iteration does not drift away from the
+   * visible artboard.
+   */
+  frameContext?: DesignFrameContext
   /**
    * Sibling pages already on the project canvas. Passed so a generated/iterated
    * page stays visually consistent with the rest of the project (shared palette,
@@ -286,6 +299,7 @@ export type ScreenTurnOptions = DesignTurnOptions & {
   screenName: string
   screenWidth?: number
   screenHeight?: number
+  screenSizeMode?: 'auto' | 'manual'
   screenManifest: ScreenManifestEntry[]
 }
 
@@ -305,6 +319,7 @@ export function buildDesignTurnPrompt(options: DesignTurnOptions): string {
       ? 'Kun is asking you to ITERATE on an existing single-file HTML design.'
       : 'Kun is asking you to design a single-file interactive HTML artifact.',
     `Workspace: ${options.workspaceRoot}`,
+    ...formatFrameContextLines(options.frameContext),
     ...(options.basePath
       ? [
           `Current design to iterate on: ${options.basePath}`,
@@ -320,6 +335,7 @@ export function buildDesignTurnPrompt(options: DesignTurnOptions): string {
     `- Modify ONLY ${editableFiles} during this turn. Do not create or modify any other file.`,
     `- Produce ONE complete standalone HTML document at \`${options.artifactRelativePath}\`; it has already been pre-created so the canvas can preview it while you work.`,
     '- Make the HTML responsive to arbitrary canvas frame sizes: use fluid layout, min/max constraints, media queries, and avoid fixed viewport wrappers unless the brief explicitly asks for one.',
+    '- If a canvas frame context is listed above, treat that width/height as the real webview viewport. Lay out the page to that viewport; content may scroll vertically when needed, but do not shrink the design to compensate for overflowing content.',
     ...DESIGN_RESIZE_RESPONSIVE_LINES,
     '- Build it INCREMENTALLY to stay inside your output limit: use focused `edit` calls or small `write` replacements and keep every tool call payload under ~4000 characters — oversized tool arguments get truncated and fail.',
     '- Write HTML ONLY through Write/Edit tool calls to the artifact file — never dump HTML into assistant text or into `design_canvas` blocks.',
@@ -385,6 +401,17 @@ function buildScreenTurnPrompt(options: ScreenTurnOptions): string {
     ...(typeof options.screenWidth === 'number' && typeof options.screenHeight === 'number'
       ? [`Selected screen frame: ${Math.round(options.screenWidth)}x${Math.round(options.screenHeight)} canvas pixels.`]
       : []),
+    ...formatFrameContextLines(
+      options.frameContext ??
+        (typeof options.screenWidth === 'number' && typeof options.screenHeight === 'number'
+          ? {
+              name: options.screenName,
+              width: options.screenWidth,
+              height: options.screenHeight,
+              sizeMode: options.screenSizeMode
+            }
+          : undefined)
+    ),
     ...(options.basePath
       ? [
           `Current design to iterate on: ${options.basePath}`,
@@ -400,6 +427,7 @@ function buildScreenTurnPrompt(options: ScreenTurnOptions): string {
     `- Modify ONLY ${editableFiles} during this turn. Do not create or modify any other file.`,
     `- Produce ONE complete standalone HTML document at \`${options.artifactRelativePath}\`; it has already been pre-created so the canvas can preview it while you work.`,
     '- Make the HTML responsive to arbitrary selected frame sizes: use fluid layout, min/max constraints, media queries, and avoid fixed viewport wrappers unless the brief explicitly asks for one.',
+    '- Treat the selected frame size above as the real webview viewport. Lay out the page to that viewport; content may scroll vertically when needed, but do not shrink the design to compensate for overflowing content.',
     ...DESIGN_RESIZE_RESPONSIVE_LINES,
     '- Build it INCREMENTALLY to stay inside your output limit: use focused `edit` calls or small `write` replacements and keep every tool call payload under ~4000 characters.',
     '- Write HTML ONLY through Write/Edit tool calls to the artifact file — never dump HTML into assistant text or into `design_canvas` blocks.',
@@ -448,6 +476,16 @@ function buildScreenTurnPrompt(options: ScreenTurnOptions): string {
     lines.push('', 'Brief:', text.slice(0, WRITE_PROTOTYPE_MAX_TEXT_CHARS))
   }
   return lines.join('\n')
+}
+
+function formatFrameContextLines(frame: DesignFrameContext | undefined): string[] {
+  if (!frame || !Number.isFinite(frame.width) || !Number.isFinite(frame.height)) return []
+  const name = frame.name?.trim()
+  const sizeMode = frame.sizeMode ? `, sizeMode: ${frame.sizeMode}` : ''
+  return [
+    `Canvas frame context: ${name ? `"${name}" — ` : ''}${Math.round(frame.width)}x${Math.round(frame.height)} canvas pixels${sizeMode}.`,
+    '- Use this as the actual webview viewport for layout decisions. Width should match exactly; vertical overflow should become natural page scrolling or frame auto-growth, never a scaled-down miniature.'
+  ]
 }
 
 function formatHtmlElementContextLines(element: DesignHtmlElementContext | undefined): string[] {
@@ -619,10 +657,10 @@ function buildCanvasTurnPrompt(options: DesignTurnOptions): string {
     ...selectionLines,
     'How to respond:',
     '- Reply with a short plain-text plan (1-3 sentences) describing what you will do.',
-    '- Then emit one or more ` ```design_canvas ` fenced JSON tool-call blocks. Do not ask the user to manually create a canvas first.',
+    '- Then call the real `design_canvas` tool one or more times. Do not emit markdown/fenced JSON blocks and do not ask the user to manually create a canvas first.',
     '- NEVER paste raw HTML into assistant text and NEVER put HTML/`write`/`content` payloads inside `design_canvas` — it only accepts the actions listed below. Screen HTML is written by the system via Write/Edit tools after `add_screen`.',
     '- The renderer validates each tool call, applies it atomically (one undo entry per call), and visually highlights the affected shapes for ~1s.',
-    '- RENDER LIVE: each block is executed the INSTANT you close its ``` fence — not at the end of your reply. So emit MANY focused calls progressively as you build (a frame, then its children, then the next section), instead of one giant batch. Keep them flowing so the user watches the design materialize piece by piece. Never bundle the whole design into a single block — stream it.',
+    '- RENDER LIVE: each tool call is executed as soon as its tool result returns — not at the end of your reply. So emit MANY focused calls progressively as you build (a frame, then its children, then the next section), instead of one giant batch. Keep them flowing so the user watches the design materialize piece by piece. Never bundle the whole design into a single call — stream it.',
     '- You can drive several parts of the layout in the same turn: fire successive `design_canvas` calls back to back (each lands immediately), so independent sections of the draft fill in one after another without waiting for a round trip.',
     '',
     'FIRST classify the request and commit to ONE lane (do not mix lanes):',
@@ -681,6 +719,8 @@ function buildCanvasTurnPrompt(options: DesignTurnOptions): string {
     '- Use `add_screen` ONLY when the user actually wants a new page / screen (the BUILD OR REDESIGN A SCREEN lane). If a filled `image` is selected and the user asked to change / edit / restyle it, do NOT `add_screen` / `add-screen` — edit that image instead. `add_screen` only creates the frame placeholder; the system will AUTOMATICALLY generate the HTML content for the screen in a follow-up step. Do NOT call write/edit tools to create HTML files in this turn.',
     '- Coordinates are in CANVAS pixels (not screen pixels); 1 unit ≈ 1px at 100% zoom.',
     '- ALL coordinates are ABSOLUTE — including shapes inside a frame or group. `parentId` sets logical grouping only; it does NOT offset coordinates. To place a child at the top-left of a frame at (200, 100), give the child x≈200, y≈100 (not 0, 0). The snapshot positions below are likewise absolute. For new screen frames, omit x/y unless the user asked for a precise placement; the app will place them in the user\'s current viewport.',
+    '- The snapshot includes `placement`: current `viewBox`, whole-board `contentBounds`, existing `occupiedFrames`, and `recommendedSlots` for new 1280x800 screens. Use it as the whiteboard map.',
+    '- For `add_screen`, prefer omitting `x`/`y` so the system chooses the current empty viewport slot. If you must set explicit coordinates, copy a `placement.recommendedSlots[...]` rect or align deliberately with `placement.occupiedFrames`; do not invent far-off, negative, or overlapping coordinates.',
     '- Refer to shapes by their `id` from the snapshot below. New shapes you add get auto-named uniquely per parent.',
     '- Prefer composing larger features as a frame containing children (use add for the frame, then add children with `parentId`); position each child within the frame’s absolute bounds.',
     '- Keep batches focused — one batch per logical change so undo granularity stays useful.',
@@ -718,7 +758,7 @@ function buildCanvasTurnPrompt(options: DesignTurnOptions): string {
     '- Do NOT invent paths. If the target shape has no `imageUrl` field in the snapshot, treat it as empty and generate fresh.',
     '',
     ...formatDesignSystemLines(),
-    'Current canvas snapshot (shape ids, names, positions, `selected`/`inView`/`nearSelection`/`aiImageHolder` flags, `imageUrl` for filled image shapes, `tokenBindings` for token-bound props, sampled absolute `points` for arrows/lines/freehand with per-shape `pointsOmitted` when extra vertices were compacted, plus a style digest — `fill`/`stroke` (color/width)/`fontColor`/`cornerRadius` — when set, so you can MATCH the existing palette instead of guessing; if `omitted` > 0 the view is truncated but selected, nearby, and viewport-visible shapes are prioritized):',
+    'Current canvas snapshot (shape ids, names, positions, `selected`/`inView`/`nearSelection`/`aiImageHolder` flags, `imageUrl` for filled image shapes, `tokenBindings` for token-bound props, sampled absolute `points` for arrows/lines/freehand with per-shape `pointsOmitted` when extra vertices were compacted, `placement` guide for viewBox/content bounds/occupied frames/recommended new-screen slots, plus a style digest — `fill`/`stroke` (color/width)/`fontColor`/`cornerRadius` — when set, so you can MATCH the existing palette instead of guessing; if `omitted` > 0 the view is truncated but selected, nearby, and viewport-visible shapes are prioritized):',
     '```json',
     snapshotJson,
     '```'
@@ -739,17 +779,14 @@ function buildCanvasTurnPrompt(options: DesignTurnOptions): string {
     lines.push('', 'Brief:', text.slice(0, WRITE_PROTOTYPE_MAX_TEXT_CHARS))
   }
   lines.push('', 'Example response shape:')
-  lines.push('```')
   lines.push('I will add a 300×200 frame with a heading inside.')
-  lines.push('```design_canvas')
+  lines.push('Then call `design_canvas` with arguments:')
   lines.push('{')
   lines.push('  "action": "update_shapes",')
   lines.push('  "ops": [')
   lines.push('    { "op": "add", "shape": { "type": "frame", "name": "Card", "x": 100, "y": 100, "width": 300, "height": 200 } }')
   lines.push('  ]')
   lines.push('}')
-  lines.push('```')
-  lines.push('```')
   return lines.join('\n')
 }
 

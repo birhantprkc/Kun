@@ -1,7 +1,13 @@
 import { useEffect, useRef } from 'react'
+import type { ToolBlock } from '../../agent/types'
 import { useChatStore } from '../../store/chat-store'
 import { collectAssistantTextForTurn } from '../../store/chat-store-runtime-helpers'
-import { applyCanvasOpsSince, setLastCanvasOpErrors } from './apply-shape-ops'
+import {
+  applyCanvasOpBlocks,
+  applyCanvasOpsSince,
+  extractCanvasOpBlocksFromValue,
+  setLastCanvasOpErrors
+} from './apply-shape-ops'
 import { useCanvasSelectionStore } from './canvas-selection-store'
 import { useCanvasShapeStore } from './canvas-shape-store'
 import { takeScreenBrief } from './screen-artifact-bridge'
@@ -47,6 +53,7 @@ export function useApplyShapeOpsLive(
     let framedThisTurn = false
     let lastRunAt = 0
     let trailingTimer: ReturnType<typeof setTimeout> | null = null
+    const appliedToolBlockIds = new Set<string>()
 
     // Screens the agent creates via add_screen still need their HTML generated in
     // a follow-up turn. Several can be created in ONE turn, but those follow-up
@@ -111,6 +118,40 @@ export function useApplyShapeOpsLive(
       lastRunAt = Date.now()
       if (!useChatStore.getState().currentTurnId) return
       applyFrom(assembledTurnText(), true)
+    }
+
+    const applyToolBlock = (block: ToolBlock): void => {
+      if (appliedToolBlockIds.has(block.id)) return
+      if (block.meta?.toolName !== 'design_canvas') return
+      if (block.status !== 'success') return
+      const detail = block.detail?.trim()
+      if (!detail) return
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(detail)
+      } catch {
+        return
+      }
+      const blocks = extractCanvasOpBlocksFromValue(parsed)
+      if (blocks.length === 0) {
+        appliedToolBlockIds.add(block.id)
+        return
+      }
+      const { affectedIds, errors } = applyCanvasOpBlocks(blocks, `tool:${block.id}`)
+      appliedToolBlockIds.add(block.id)
+      if (errors.length > 0) errorsThisTurn.push(...errors)
+      if (affectedIds.length === 0) return
+      for (const id of affectedIds) affectedThisTurn.add(id)
+      useCanvasSelectionStore.getState().select([...affectedThisTurn])
+      if (!framedThisTurn) {
+        framedThisTurn = true
+        useDesignAssistantStore.getState().markAiAffected(affectedIds)
+      } else {
+        useDesignAssistantStore.setState({
+          lastAiAffectedIds: affectedIds,
+          lastAiActionAt: Date.now()
+        })
+      }
     }
 
     const scheduleStreaming = (): void => {
@@ -188,6 +229,11 @@ export function useApplyShapeOpsLive(
       const turnStarted = !prev.currentTurnId && Boolean(state.currentTurnId)
       const turnEnded = Boolean(prev.currentTurnId) && !state.currentTurnId
       if (turnStarted) resetTurn()
+      if (state.currentTurnId && state.blocks !== prev.blocks) {
+        for (const block of state.blocks) {
+          if (block.kind === 'tool') applyToolBlock(block)
+        }
+      }
       if (state.currentTurnId && state.liveAssistant !== prev.liveAssistant) {
         scheduleStreaming()
       }

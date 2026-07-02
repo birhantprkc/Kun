@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { snapshotCanvas } from './canvas-snapshot'
-import { createDefaultShape, createEmptyDocument } from './canvas-types'
+import { createDefaultShape, createEmptyDocument, createHtmlFrameShape } from './canvas-types'
 
 describe('snapshotCanvas', () => {
   it('returns empty for a fresh document', () => {
@@ -111,6 +111,60 @@ describe('snapshotCanvas', () => {
     expect(snap.shapes.find((shape) => shape.id === inView.id)?.inView).toBe(true)
     expect(snap.shapes.find((shape) => shape.id === selected.id)?.selected).toBe(true)
     expect(snap.shapes.find((shape) => shape.id === nearby.id)?.nearSelection).toBe(true)
+  })
+
+  it('adds a placement guide with current viewport and recommended screen slots', () => {
+    const doc = createEmptyDocument()
+    const snap = snapshotCanvas(doc, new Set(), {
+      viewBox: { x: 1000, y: 500, width: 1600, height: 1000 }
+    })
+
+    expect(snap.placement).toMatchObject({
+      empty: true,
+      viewBox: { x: 1000, y: 500, w: 1600, h: 1000 },
+      defaultScreen: { w: 1280, h: 800 },
+      occupiedFrames: []
+    })
+    expect(snap.placement?.recommendedSlots[0]).toMatchObject({
+      label: 'next',
+      x: 1160,
+      y: 600,
+      w: 1280,
+      h: 800
+    })
+    expect(snap.placement?.recommendedSlots).toHaveLength(3)
+  })
+
+  it('reports occupied HTML frames and avoids them in recommended placement', () => {
+    const doc = createEmptyDocument()
+    const root = doc.objects[doc.rootId]
+    const home = createHtmlFrameShape('Home', 1160, 600, 'home-artifact', 'desktop')
+    doc.objects[home.id] = { ...home, parentId: doc.rootId }
+    doc.objects[doc.rootId] = { ...root, children: [home.id] }
+
+    const snap = snapshotCanvas(doc, new Set([home.id]), {
+      viewBox: { x: 1000, y: 500, width: 1600, height: 1000 }
+    })
+
+    expect(snap.placement?.occupiedFrames).toEqual([
+      expect.objectContaining({
+        id: home.id,
+        name: 'Home',
+        htmlArtifactId: 'home-artifact',
+        x: 1160,
+        y: 600,
+        w: 1280,
+        h: 800
+      })
+    ])
+    expect(snap.placement?.selectedBounds).toMatchObject({ x: 1160, y: 600, w: 1280, h: 800 })
+    expect(snap.placement?.recommendedSlots[0]).toMatchObject({
+      label: 'next',
+      x: 2520,
+      y: 600,
+      w: 1280,
+      h: 800
+    })
   })
 
   it('keeps selected, nearby, and viewport-visible shapes when maxShapes truncates', () => {

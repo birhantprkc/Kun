@@ -15,15 +15,14 @@ import { createScreenTool } from '../../../design/canvas/tools/screen-tool'
 import { createArrowTool, createLineTool } from '../../../design/canvas/tools/linear-tool'
 import { createDrawTool } from '../../../design/canvas/tools/draw-tool'
 import type { CanvasToolHandler } from '../../../design/canvas/tools/tool-types'
-import type { CanvasDocument, CanvasTool } from '../../../design/canvas/canvas-types'
-import { createEmptyDocument } from '../../../design/canvas/canvas-types'
+import type { CanvasDocument, CanvasTool, Rect, ViewBox } from '../../../design/canvas/canvas-types'
+import { createEmptyDocument, shapeBounds } from '../../../design/canvas/canvas-types'
 import { loadCanvasDocument, persistCanvasDocument } from '../../../design/canvas/canvas-persistence'
 import { loadDesignSystem, persistDesignSystem } from '../../../design/canvas/design-system-persistence'
 import { useDesignSystemStore } from '../../../design/canvas/design-system-store'
 import { createEmptyDesignSystem } from '../../../design/canvas/design-system-types'
 import { syncHtmlArtifactsToBoardDocument, syncHtmlFrameNodesToArtifacts } from '../../../design/design-board'
 import {
-  CANVAS_SCREEN_FIT_PADDING,
   getCanvasDocumentContentBounds
 } from '../../../design/canvas/canvas-placement'
 import type { DesignArtifact } from '../../../design/design-types'
@@ -49,6 +48,75 @@ import { PrototypePlayerOverlay } from './PrototypePlayerOverlay'
 import { AlignmentToolbar } from './AlignmentToolbar'
 import { HtmlFrameOverlay } from './HtmlFrameOverlay'
 import { SidebarTitlebarToggleButton } from '../../sidebar/SidebarPrimitives'
+
+const CANVAS_VIEWPORT_STORAGE_PREFIX = 'kun.design.canvasViewport'
+
+function canvasViewportStorageKey(workspaceRoot: string, artifactId: string, baseDir?: string): string {
+  return [
+    CANVAS_VIEWPORT_STORAGE_PREFIX,
+    encodeURIComponent(workspaceRoot),
+    encodeURIComponent(baseDir ?? ''),
+    encodeURIComponent(artifactId)
+  ].join(':')
+}
+
+function isViewBox(value: unknown): value is ViewBox {
+  if (!value || typeof value !== 'object') return false
+  const box = value as Partial<ViewBox>
+  return (
+    typeof box.x === 'number' &&
+    typeof box.y === 'number' &&
+    typeof box.width === 'number' &&
+    typeof box.height === 'number' &&
+    Number.isFinite(box.x) &&
+    Number.isFinite(box.y) &&
+    Number.isFinite(box.width) &&
+    Number.isFinite(box.height) &&
+    box.width > 0 &&
+    box.height > 0
+  )
+}
+
+function readStoredCanvasViewport(key: string): ViewBox | null {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return null
+    const raw = window.localStorage.getItem(key)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return isViewBox(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function writeStoredCanvasViewport(key: string, vbox: ViewBox): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return
+    window.localStorage.setItem(key, JSON.stringify(vbox))
+  } catch {
+    // Ignore private-mode/quota failures; view persistence is best-effort.
+  }
+}
+
+function boundsForShapeIds(doc: CanvasDocument, ids: readonly string[]): Rect | null {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  let found = false
+  for (const id of ids) {
+    const shape = doc.objects[id]
+    if (!shape) continue
+    const bounds = shapeBounds(shape)
+    found = true
+    minX = Math.min(minX, bounds.x)
+    minY = Math.min(minY, bounds.y)
+    maxX = Math.max(maxX, bounds.x + bounds.width)
+    maxY = Math.max(maxY, bounds.y + bounds.height)
+  }
+  if (!found) return null
+  return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) }
+}
 
 const toolFactories: Record<CanvasTool, () => CanvasToolHandler> = {
   select: createSelectTool,
@@ -123,6 +191,10 @@ export function CanvasViewport({
   const tool = useMemo(() => toolFactories[activeTool](), [activeTool])
   const middlePanTool = useMemo(() => createHandTool(), [])
   const workspaceValue = useMemo(() => ({ workspaceRoot }), [workspaceRoot])
+  const viewportStorageKey = useMemo(
+    () => canvasViewportStorageKey(workspaceRoot, artifactId, baseDir),
+    [artifactId, baseDir, workspaceRoot]
+  )
   const selectedHtmlArtifactId = useMemo(() => {
     for (const id of selectedIds) {
       const shape = document.objects[id]
@@ -157,17 +229,24 @@ export function CanvasViewport({
     }
 
     let cancelled = false
-    let fitFrame = 0
+    let viewFrame = 0
     let nodeSyncTimer: ReturnType<typeof setTimeout> | null = null
     let nodeSyncDoc: CanvasDocument | null = null
     setDocLoaded(false)
 
-    const fitDocument = (doc: CanvasDocument): void => {
-      const bounds = getCanvasDocumentContentBounds(doc)
+    const focusBoundsAtActualSize = (bounds: Rect | null): void => {
       if (!bounds) return
-      fitFrame = requestAnimationFrame(() => {
+      viewFrame = requestAnimationFrame(() => {
         if (!cancelled) {
-          useCanvasViewportStore.getState().zoomToFit(bounds, CANVAS_SCREEN_FIT_PADDING, { maxZoom: 1 })
+          const store = useCanvasViewportStore.getState()
+          const width = Math.max(1, store.containerWidth)
+          const height = Math.max(1, store.containerHeight)
+          store.setVbox({
+            x: bounds.x + bounds.width / 2 - width / 2,
+            y: bounds.y + bounds.height / 2 - height / 2,
+            width,
+            height
+          })
         }
       })
     }
@@ -192,18 +271,27 @@ export function CanvasViewport({
     void loadCanvasDocument(workspaceRoot, artifactId, baseDir).then((loaded) => {
       if (cancelled) return
       let doc = loaded ?? createEmptyDocument()
+      let addedFrameIds: string[] = []
       if (syncHtmlScreens) {
         const synced = syncHtmlArtifactsToBoardDocument(
           doc,
           useDesignWorkspaceStore.getState().artifacts
         )
         doc = synced.document
+        addedFrameIds = synced.addedFrameIds
         if (synced.addedFrameIds.length > 0 || synced.updatedFrameIds.length > 0) {
           persistCanvasDocument(workspaceRoot, artifactId, doc, baseDir)
         }
       }
       useCanvasShapeStore.getState().loadDocument(doc)
-      fitDocument(doc)
+      const storedView = readStoredCanvasViewport(viewportStorageKey)
+      if (storedView) {
+        useCanvasViewportStore.getState().setVbox(storedView)
+      } else if (addedFrameIds.length > 0) {
+        focusBoundsAtActualSize(boundsForShapeIds(doc, addedFrameIds))
+      } else if (loaded) {
+        focusBoundsAtActualSize(getCanvasDocumentContentBounds(doc))
+      }
       setDocLoaded(true)
     })
 
@@ -231,12 +319,12 @@ export function CanvasViewport({
 
     return () => {
       cancelled = true
-      if (fitFrame) cancelAnimationFrame(fitFrame)
+      if (viewFrame) cancelAnimationFrame(viewFrame)
       if (nodeSyncTimer) clearTimeout(nodeSyncTimer)
       unsubscribe()
       unsubscribeDesignSystem()
     }
-  }, [workspaceRoot, artifactId, baseDir, syncHtmlScreens])
+  }, [workspaceRoot, artifactId, baseDir, syncHtmlScreens, viewportStorageKey])
 
   const htmlArtifactSyncKey = useMemo(() => {
     if (!syncHtmlScreens) return ''
@@ -264,12 +352,37 @@ export function CanvasViewport({
     useCanvasShapeStore.getState().loadDocument(synced.document)
     persistCanvasDocument(workspaceRoot, artifactId, synced.document, baseDir)
     if (synced.addedFrameIds.length > 0) {
-      const bounds = getCanvasDocumentContentBounds(synced.document)
+      const bounds = boundsForShapeIds(synced.document, synced.addedFrameIds)
       if (bounds) {
-        useCanvasViewportStore.getState().zoomToFit(bounds, CANVAS_SCREEN_FIT_PADDING, { maxZoom: 1 })
+        const store = useCanvasViewportStore.getState()
+        const width = Math.max(1, store.containerWidth)
+        const height = Math.max(1, store.containerHeight)
+        store.setVbox({
+          x: bounds.x + bounds.width / 2 - width / 2,
+          y: bounds.y + bounds.height / 2 - height / 2,
+          width,
+          height
+        })
       }
     }
   }, [artifactId, baseDir, docLoaded, htmlArtifactSyncKey, syncHtmlScreens, workspaceRoot])
+
+  useEffect(() => {
+    if (!docLoaded || !artifactId || !workspaceRoot) return
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const unsubscribe = useCanvasViewportStore.subscribe((state, prev) => {
+      if (state.vbox === prev.vbox) return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        writeStoredCanvasViewport(viewportStorageKey, useCanvasViewportStore.getState().vbox)
+      }, 250)
+    })
+    return () => {
+      if (timer) clearTimeout(timer)
+      unsubscribe()
+    }
+  }, [artifactId, docLoaded, viewportStorageKey, workspaceRoot])
 
   const screenToCanvas = useCallback(
     (clientX: number, clientY: number) => {
@@ -420,7 +533,7 @@ export function CanvasViewport({
 
   return (
     <CanvasWorkspaceContext.Provider value={workspaceValue}>
-      <div className="ds-no-drag relative h-full w-full overflow-hidden bg-ds-main">
+      <div className="ds-no-drag relative h-full w-full overflow-hidden bg-[#f8fafc] dark:bg-[#111318]">
         <div className="pointer-events-none absolute left-3 top-3 z-40 flex min-w-0 items-start">
           <div
             className={`pointer-events-auto flex min-w-0 items-center gap-2 ${
@@ -457,7 +570,7 @@ export function CanvasViewport({
         </div>
         <div
           ref={containerRef}
-          className="absolute inset-0 overflow-hidden bg-[color-mix(in_srgb,var(--ds-bg-main)_90%,white)] dark:bg-[color-mix(in_srgb,var(--ds-bg-main)_88%,black)]"
+          className="absolute inset-0 overflow-hidden bg-[#f8fafc] dark:bg-[#111318]"
         >
           <AlignmentToolbar />
           {!docLoaded || !root ? (

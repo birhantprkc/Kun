@@ -272,6 +272,7 @@ export class KunRuntimeProvider implements AgentProvider {
         sourceRequest?: string
         title?: string
       }
+      guiDesignCanvas?: boolean
       attachmentIds?: string[]
       workspaceCheckpointId?: string
       fileReferences?: Array<{ path: string; relativePath: string; name: string; kind?: 'file' | 'directory' }>
@@ -304,6 +305,9 @@ export class KunRuntimeProvider implements AgentProvider {
         sourceRequest: options.guiPlan.sourceRequest,
         title: options.guiPlan.title
       }
+    }
+    if (options?.guiDesignCanvas) {
+      body.guiDesignCanvas = true
     }
     if (options?.attachmentIds?.length) {
       body.attachmentIds = options.attachmentIds
