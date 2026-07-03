@@ -69,7 +69,7 @@ describe('design quality repair dispatch', () => {
     })).toBe('shape:frame_1')
   })
 
-  it('activates the target and sends an auto repair prompt when ready', () => {
+  it('ignores automatic repair requests so quality checks cannot edit without consent', () => {
     const designState = fakeDesignState()
     const selectCanvasShapes = vi.fn()
     const sendDesignPrompt = vi.fn()
@@ -93,13 +93,44 @@ describe('design quality repair dispatch', () => {
       timerApi: { setTimeout, now: () => 10_000 }
     })
 
+    expect(autoRepairSentRef.current.has('artifact:screen_home')).toBe(false)
+    expect(designState.setActiveArtifact).not.toHaveBeenCalled()
+    expect(selectCanvasShapes).not.toHaveBeenCalled()
+    expect(designState.setDesignIntentMode).not.toHaveBeenCalled()
+    expect(sendDesignPrompt).not.toHaveBeenCalled()
+  })
+
+  it('activates the target and sends a manual repair prompt when requested', () => {
+    const designState = fakeDesignState()
+    const selectCanvasShapes = vi.fn()
+    const sendDesignPrompt = vi.fn()
+    const setTimeout = vi.fn((callback: () => void) => {
+      callback()
+      return 1
+    })
+    const autoRepairSentRef = { current: new Set<string>() }
+
+    requestDesignQualityRepairDispatch({
+      payload,
+      findings: [finding],
+      mode: 'manual',
+      autoRepairSentRef,
+      pendingTimersRef: { current: new Map() },
+      manualLastSentRef: { current: new Map() },
+      runtimeState: readyState,
+      sendDesignPrompt,
+      getDesignState: () => designState,
+      selectCanvasShapes,
+      timerApi: { setTimeout, now: () => 10_000 }
+    })
+
     expect(autoRepairSentRef.current.has('artifact:screen_home')).toBe(true)
     expect(designState.setActiveArtifact).toHaveBeenCalledWith('board')
     expect(selectCanvasShapes).toHaveBeenCalledWith(['frame_home'])
     expect(designState.setDesignIntentMode).toHaveBeenCalledWith('modify')
     expect(sendDesignPrompt).toHaveBeenCalledWith(expect.stringContaining('TEXT_OVERFLOW'), {
-      displayText: 'Auto-repair design quality: TEXT_OVERFLOW',
-      source: 'auto-quality-repair'
+      displayText: 'Repair design quality: TEXT_OVERFLOW',
+      source: 'manual-quality-repair'
     })
   })
 
@@ -111,7 +142,7 @@ describe('design quality repair dispatch', () => {
     requestDesignQualityRepairDispatch({
       payload,
       findings: [finding],
-      mode: 'auto',
+      mode: 'manual',
       autoRepairSentRef: { current: new Set() },
       pendingTimersRef,
       manualLastSentRef: { current: new Map() },
@@ -120,7 +151,7 @@ describe('design quality repair dispatch', () => {
       timerApi: { setTimeout }
     })
 
-    expect(pendingTimersRef.current.get('artifact:screen_home')).toBe(42)
+    expect(pendingTimersRef.current.get('manual:artifact:screen_home|TEXT_OVERFLOW')).toBe(42)
     expect(sendDesignPrompt).not.toHaveBeenCalled()
   })
 

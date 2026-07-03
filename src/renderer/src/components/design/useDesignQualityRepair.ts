@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react'
 import {
-  shouldAutoRepairDesignHtmlFinding,
-  type DesignHtmlQualityFinding,
   type DesignRuntimeQualityPayload
 } from '../../design/design-html-quality'
 import {
@@ -61,7 +59,7 @@ export function useDesignQualityRepair({
 
   const requestDesignQualityRepair = useCallback((
     payload: DesignRuntimeQualityPayload,
-    findings: DesignHtmlQualityFinding[],
+    findings: DesignRuntimeQualityPayload['findings'],
     mode: DesignQualityRepairMode
   ): void => {
     requestDesignQualityRepairDispatch({
@@ -82,9 +80,11 @@ export function useDesignQualityRepair({
   }, [sendDesignPrompt])
 
   const handleDesignRuntimeQualityFindings = useCallback((payload: DesignRuntimeQualityPayload): void => {
-    const autoRepairFindings = payload.findings.filter(shouldAutoRepairDesignHtmlFinding)
-    requestDesignQualityRepair(payload, autoRepairFindings, 'auto')
-  }, [requestDesignQualityRepair])
+    void payload
+    // Runtime quality checks are advisory. Do not send repair prompts without an
+    // explicit user click; unexpected design edits are more disruptive than a
+    // quality badge waiting for review.
+  }, [])
 
   const handleDesignQualityRepairRequest = useCallback((payload: DesignRuntimeQualityPayload): void => {
     requestDesignQualityRepair(payload, payload.findings, 'manual')

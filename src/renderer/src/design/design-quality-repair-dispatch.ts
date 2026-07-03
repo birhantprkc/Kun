@@ -86,20 +86,15 @@ export function requestDesignQualityRepairDispatch(
 ): void {
   const repairFindings = mergeDesignHtmlQualityFindings(options.findings)
   if (repairFindings.length === 0) return
+  if (options.mode === 'auto') return
   const codes = repairFindings.map((finding) => finding.code).sort()
   const autoScopeKey = designAutoRepairPayloadKey(options.payload)
-  const key =
-    options.mode === 'auto'
-      ? autoScopeKey
-      : `manual:${autoScopeKey || 'unknown'}|${codes.join(',')}`
+  const key = `manual:${autoScopeKey || 'unknown'}|${codes.join(',')}`
   if (!key) return
-  if (options.mode === 'auto' && options.autoRepairSentRef.current.has(autoScopeKey)) return
 
   const now = options.timerApi?.now ?? Date.now
-  if (options.mode === 'manual') {
-    const lastSentAt = options.manualLastSentRef.current.get(key) ?? 0
-    if (now() - lastSentAt < 3000) return
-  }
+  const lastSentAt = options.manualLastSentRef.current.get(key) ?? 0
+  if (now() - lastSentAt < 3000) return
 
   const setTimer =
     options.timerApi?.setTimeout ?? ((callback: () => void, delayMs: number) => window.setTimeout(callback, delayMs))
@@ -110,7 +105,6 @@ export function requestDesignQualityRepairDispatch(
   const maxAttempts = options.timerApi?.maxAttempts ?? 24
 
   const trigger = (attempt: number): void => {
-    if (options.mode === 'auto' && options.autoRepairSentRef.current.has(autoScopeKey)) return
     if (!isRepairRuntimeReady(options.runtimeState())) {
       if (attempt >= maxAttempts || options.pendingTimersRef.current.has(key)) return
       const timer = setTimer(() => {
@@ -121,17 +115,13 @@ export function requestDesignQualityRepairDispatch(
       return
     }
 
-    if (options.mode === 'auto') {
+    options.manualLastSentRef.current.set(key, now())
+    if (autoScopeKey) {
       options.autoRepairSentRef.current.add(autoScopeKey)
-    } else {
-      options.manualLastSentRef.current.set(key, now())
-      if (autoScopeKey) {
-        options.autoRepairSentRef.current.add(autoScopeKey)
-        const autoPending = options.pendingTimersRef.current.get(autoScopeKey)
-        if (autoPending) {
-          clearTimer(autoPending)
-          options.pendingTimersRef.current.delete(autoScopeKey)
-        }
+      const autoPending = options.pendingTimersRef.current.get(autoScopeKey)
+      if (autoPending) {
+        clearTimer(autoPending)
+        options.pendingTimersRef.current.delete(autoScopeKey)
       }
     }
     const pending = options.pendingTimersRef.current.get(key)
@@ -142,15 +132,12 @@ export function requestDesignQualityRepairDispatch(
 
     const store = (options.getDesignState ?? useDesignWorkspaceStore.getState)()
     activateRepairTarget(options)
-    const prompt = buildDesignHtmlQualityRepairPrompt(repairFindings, options.mode, store.designContext)
-    const displayText =
-      options.mode === 'auto'
-        ? `Auto-repair design quality: ${codes.join(', ')}`
-        : `Repair design quality: ${codes.join(', ')}`
+    const prompt = buildDesignHtmlQualityRepairPrompt(repairFindings, 'manual', store.designContext)
+    const displayText = `Repair design quality: ${codes.join(', ')}`
     setTimer(() => {
       options.sendDesignPrompt(prompt, {
         displayText,
-        source: options.mode === 'auto' ? 'auto-quality-repair' : 'manual-quality-repair'
+        source: 'manual-quality-repair'
       })
     }, sendDelayMs)
   }
