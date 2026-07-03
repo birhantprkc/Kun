@@ -293,7 +293,7 @@ describe('showPostUpdateReleaseNotes', () => {
         buttons: ['查看更新日志', '稍后']
       })
     )
-    expect(openExternal).toHaveBeenCalledWith('https://deepseek-gui.com/changelog')
+    expect(openExternal).toHaveBeenCalledWith('https://github.com/KunAgent/Kun/tree/master/release')
     expect(JSON.parse(mockedFiles.get(versionStatePath) ?? '{}')).toEqual({
       lastSeenVersion: '0.2.0'
     })

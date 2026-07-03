@@ -50,7 +50,7 @@ let backgroundCheckPromise: Promise<void> | null = null
 
 const GUI_UPDATE_SCHEDULE_FILE = 'gui-update-schedule.json'
 const GUI_VERSION_STATE_FILE = 'gui-version-state.json'
-const DEFAULT_CHANGELOG_URL = 'https://deepseek-gui.com/changelog'
+const DEFAULT_CHANGELOG_URL = 'https://github.com/KunAgent/Kun/tree/master/release'
 
 type GuiVersionState = {
   lastSeenVersion?: string
