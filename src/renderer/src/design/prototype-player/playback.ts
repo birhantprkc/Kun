@@ -1,4 +1,4 @@
-import type { DesignArtifact, DesignPrototypeLink } from "../design-types"
+import { currentDesignArtifactVersion, type DesignArtifact, type DesignPrototypeLink } from "../design-types"
 import {
   defaultFrameSizeForDesignTarget,
   defaultPreviewNodeSizeForDesignTarget
@@ -355,7 +355,7 @@ export function prototypeMissingScreenPromptValues(
   return {
     current: artifact.title || 'Current screen',
     href,
-    sourcePath: artifact.relativePath,
+    sourcePath: prototypeArtifactRelativePath(artifact),
     suggestedTitle: suggestedPrototypeScreenTitleFromHref(href)
   }
 }
@@ -393,13 +393,25 @@ export function hasPrototypePlayback(artifacts: readonly DesignArtifact[]): bool
   return artifacts.some((artifact) => artifact.kind === 'html')
 }
 
+export function prototypeArtifactRelativePath(artifact: Pick<DesignArtifact, 'relativePath' | 'versions'>): string {
+  return currentDesignArtifactVersion(artifact)?.relativePath ?? artifact.relativePath
+}
+
+export function prototypeArtifactRelativePaths(artifact: Pick<DesignArtifact, 'relativePath' | 'versions'>): string[] {
+  return Array.from(new Set([
+    prototypeArtifactRelativePath(artifact),
+    artifact.relativePath,
+    ...artifact.versions.map((version) => version.relativePath)
+  ].filter((path) => path.trim())))
+}
+
 export function resolvePrototypeScreens(artifacts: readonly DesignArtifact[]): PrototypePlayerScreen[] {
   return artifacts
     .filter((artifact) => artifact.kind === 'html')
     .map((artifact) => ({
       id: artifact.id,
       title: artifact.title,
-      relativePath: artifact.relativePath
+      relativePath: prototypeArtifactRelativePath(artifact)
     }))
 }
 
@@ -429,21 +441,27 @@ export function resolvePrototypeLinks(
       uniqueFuzzyArtifactByTitle(link.targetTitle)
     if (!target || target.kind !== 'html' || target.id === artifact.id || seen.has(target.id)) continue
     seen.add(target.id)
+    const targetPaths = prototypeArtifactRelativePaths(target)
     out.push({
       ...link,
       targetArtifactId: target.id,
       targetTitle: target.title,
-      targetRelativePath: target.relativePath
+      targetRelativePath: prototypeArtifactRelativePath(target),
+      ...(targetPaths.length > 1 ? { targetRelativePaths: targetPaths } : {})
     })
   }
   for (const target of htmlArtifacts) {
     if (target.id === artifact.id || seen.has(target.id)) continue
     seen.add(target.id)
+    const sourcePath = prototypeArtifactRelativePath(artifact)
+    const targetPath = prototypeArtifactRelativePath(target)
+    const targetPaths = prototypeArtifactRelativePaths(target)
     out.push({
       targetTitle: target.title,
       targetArtifactId: target.id,
-      targetRelativePath: target.relativePath,
-      href: buildRelativePrototypeHref(artifact.relativePath, target.relativePath),
+      targetRelativePath: targetPath,
+      ...(targetPaths.length > 1 ? { targetRelativePaths: targetPaths } : {}),
+      href: buildRelativePrototypeHref(sourcePath, targetPath),
       label: target.title
     })
   }

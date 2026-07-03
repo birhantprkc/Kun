@@ -5,7 +5,8 @@ import type { DesignArtifact } from '../../../design/design-types'
 import {
   PrototypePlayerOverlay,
   buildPrototypeViewportModeScript,
-  shouldInjectPrototypeNavigationCapture
+  shouldInjectPrototypeNavigationCapture,
+  shouldSyncPrototypePlayerToInitialId
 } from './PrototypePlayerOverlay'
 
 const now = '2026-06-30T00:00:00.000Z'
@@ -55,6 +56,33 @@ describe('PrototypePlayerOverlay', () => {
       webviewUrl: 'file:///workspace/.kun-design/doc/home/v1.html?rev=1',
       webviewReady: true,
       hasExecuteJavaScript: false
+    })).toBe(false)
+  })
+
+  it('syncs playback to a changed external initial screen while open', () => {
+    expect(shouldSyncPrototypePlayerToInitialId({
+      open: true,
+      initialCurrentId: 'threads',
+      lastInitialCurrentId: 'home',
+      currentId: 'home'
+    })).toBe(true)
+    expect(shouldSyncPrototypePlayerToInitialId({
+      open: true,
+      initialCurrentId: 'threads',
+      lastInitialCurrentId: 'threads',
+      currentId: 'home'
+    })).toBe(false)
+    expect(shouldSyncPrototypePlayerToInitialId({
+      open: true,
+      initialCurrentId: 'threads',
+      lastInitialCurrentId: 'home',
+      currentId: 'threads'
+    })).toBe(false)
+    expect(shouldSyncPrototypePlayerToInitialId({
+      open: false,
+      initialCurrentId: 'threads',
+      lastInitialCurrentId: 'home',
+      currentId: 'home'
     })).toBe(false)
   })
 
@@ -121,6 +149,33 @@ describe('PrototypePlayerOverlay', () => {
     expect(html).toContain('width:100%')
     expect(html).toContain('.kun-design/doc/home/v1.html - Web 1280 x 800')
     expect(html).toContain('1280 x 800 web prototype')
+  })
+
+  it('renders the current version path instead of stale screen paths', () => {
+    const v1 = '.kun-design/doc/threads/v1.html'
+    const v2 = '.kun-design/doc/threads/v2.html'
+    const html = renderToStaticMarkup(
+      createElement(PrototypePlayerOverlay, {
+        open: true,
+        workspaceRoot: '/workspace',
+        designTarget: 'app',
+        artifacts: [
+          htmlArtifact('home', 'Home'),
+          htmlArtifact('threads', 'Threads', {
+            relativePath: v2,
+            versions: [
+              { id: 'threads-v2', relativePath: v2, createdAt: now, summary: 'Updated interaction pass' },
+              { id: 'threads-v1', relativePath: v1, createdAt: now, summary: 'Initial screen' }
+            ]
+          })
+        ],
+        initialArtifactId: 'threads',
+        onClose: () => {}
+      })
+    )
+
+    expect(html).toContain(`${v2} - App 390 x 844`)
+    expect(html).toContain(`title="${v2}"`)
   })
 
   it('does not render when closed', () => {

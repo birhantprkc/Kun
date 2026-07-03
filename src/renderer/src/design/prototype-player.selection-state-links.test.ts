@@ -442,6 +442,49 @@ describe("prototype-player selection, state, and links", () => {
         }
       ])
     })
+    it('uses current artifact versions for prototype links while resolving older version hrefs', () => {
+      const homeV1 = '.kun-design/doc/home/v1.html'
+      const homeV2 = '.kun-design/doc/home/v2.html'
+      const threadsV1 = '.kun-design/doc/threads/v1.html'
+      const threadsV2 = '.kun-design/doc/threads/v2.html'
+      const home = artifact('home', 'Home', {
+        relativePath: homeV2,
+        versions: [
+          { id: 'home-v2', relativePath: homeV2, createdAt: now, summary: 'New home' },
+          { id: 'home-v1', relativePath: homeV1, createdAt: now, summary: 'Old home' }
+        ]
+      })
+      const threads = artifact('threads', 'Threads', {
+        relativePath: threadsV2,
+        versions: [
+          { id: 'threads-v2', relativePath: threadsV2, createdAt: now, summary: 'New threads' },
+          { id: 'threads-v1', relativePath: threadsV1, createdAt: now, summary: 'Old threads' }
+        ]
+      })
+      const links = resolvePrototypeLinks(home, [home, threads])
+
+      expect(resolvePrototypeScreens([home, threads])).toEqual([
+        { id: 'home', title: 'Home', relativePath: homeV2 },
+        { id: 'threads', title: 'Threads', relativePath: threadsV2 }
+      ])
+      expect(links).toEqual([
+        {
+          targetArtifactId: 'threads',
+          targetTitle: 'Threads',
+          targetRelativePath: threadsV2,
+          targetRelativePaths: [threadsV2, threadsV1],
+          href: '../threads/v2.html',
+          label: 'Threads'
+        }
+      ])
+      expect(
+        resolvePrototypeNavigationTarget(
+          'file:///workspace/.kun-design/doc/home/v2.html#kun-proto-nav=..%2Fthreads%2Fv1.html',
+          'file:///workspace/.kun-design/doc/home/v2.html',
+          links
+        )?.targetArtifactId
+      ).toBe('threads')
+    })
     it('keeps explicit prototype links first and appends fallback sibling pages', () => {
       const home = artifact('home', 'Home', {
         prototypeLinks: [{ targetTitle: 'Signup', targetArtifactId: 'signup', label: 'Start trial' }]

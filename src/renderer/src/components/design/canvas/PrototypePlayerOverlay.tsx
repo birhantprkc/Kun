@@ -11,6 +11,7 @@ import {
   extractPrototypeHashRouteHref,
   extractPrototypeNavigationHref,
   prototypeBackNavigationSteps,
+  prototypeArtifactRelativePath,
   prototypeMissingScreenPromptValues,
   prototypePlayerGoBack,
   prototypePlayerNavigateTo,
@@ -52,6 +53,20 @@ export function shouldInjectPrototypeNavigationCapture({
   hasExecuteJavaScript: boolean
 }): boolean {
   return open && Boolean(webviewUrl) && webviewReady && hasExecuteJavaScript
+}
+
+export function shouldSyncPrototypePlayerToInitialId({
+  open,
+  initialCurrentId,
+  lastInitialCurrentId,
+  currentId
+}: {
+  open: boolean
+  initialCurrentId: string | null
+  lastInitialCurrentId: string | null
+  currentId: string | null
+}): boolean {
+  return open && Boolean(initialCurrentId) && initialCurrentId !== lastInitialCurrentId && currentId !== initialCurrentId
 }
 
 export function buildPrototypeViewportModeScript(target: DesignTarget): string {
@@ -101,6 +116,7 @@ function PrototypePlayerOverlayInner({
   const [missingHref, setMissingHref] = useState('')
   const [previewTarget, setPreviewTarget] = useState<DesignTarget>(() => normalizeDesignTarget(designTarget))
   const wasOpenRef = useRef(false)
+  const lastInitialCurrentIdRef = useRef<string | null>(null)
 
   const initialCurrentId = useMemo(
     () => (open ? resolveInitialPrototypeArtifactId(artifacts, initialArtifactId) : null),
@@ -115,6 +131,7 @@ function PrototypePlayerOverlayInner({
     () => artifacts.find((artifact) => artifact.id === activeCurrentId && artifact.kind === 'html') ?? null,
     [activeCurrentId, artifacts]
   )
+  const currentArtifactPath = currentArtifact ? prototypeArtifactRelativePath(currentArtifact) : ''
   const htmlArtifacts = useMemo(
     () => resolvePrototypeScreens(artifacts),
     [artifacts]
@@ -142,7 +159,7 @@ function PrototypePlayerOverlayInner({
   const viewportLabel = `${previewTargetLabel} ${viewportFrame.width} x ${viewportFrame.height}`
   const preview = useDesignHtmlPreview({
     workspaceRoot,
-    relativePath: currentArtifact?.relativePath,
+    relativePath: currentArtifactPath,
     enabled: Boolean(open && workspaceRoot && currentArtifact),
     partition: 'kun-proto'
   })
@@ -155,6 +172,7 @@ function PrototypePlayerOverlayInner({
   useEffect(() => {
     if (!open) {
       wasOpenRef.current = false
+      lastInitialCurrentIdRef.current = null
       return
     }
     if (!shouldInitializePrototypePlayerCurrentId({ open, wasOpen: wasOpenRef.current, currentId })) return
@@ -162,6 +180,23 @@ function PrototypePlayerOverlayInner({
     setHistory([])
     setMissingHref('')
     wasOpenRef.current = true
+  }, [currentId, initialCurrentId, open])
+
+  useEffect(() => {
+    if (!open) return
+    const lastInitialCurrentId = lastInitialCurrentIdRef.current
+    lastInitialCurrentIdRef.current = initialCurrentId
+    if (!shouldSyncPrototypePlayerToInitialId({
+      open,
+      initialCurrentId,
+      lastInitialCurrentId,
+      currentId
+    })) {
+      return
+    }
+    setCurrentId(initialCurrentId)
+    setHistory([])
+    setMissingHref('')
   }, [currentId, initialCurrentId, open])
 
   useEffect(() => {
@@ -300,7 +335,7 @@ function PrototypePlayerOverlayInner({
               </div>
               {currentArtifact ? (
                 <div className="truncate text-[10.5px] text-ds-faint">
-                  {currentArtifact.relativePath} - {viewportLabel}
+                  {currentArtifactPath} - {viewportLabel}
                 </div>
               ) : null}
             </div>

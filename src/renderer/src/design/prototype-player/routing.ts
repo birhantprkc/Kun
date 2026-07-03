@@ -8,6 +8,7 @@ export type PrototypePlayerLink = DesignPrototypeLink & {
   targetArtifactId: string
   targetTitle: string
   targetRelativePath?: string
+  targetRelativePaths?: readonly string[]
 }
 
 export type PrototypePlayerScreen = {
@@ -224,13 +225,18 @@ export function uniqueRelativePathLinkMatch(
   if (!normalizedPath) return null
   const pathHasDirectory = normalizedPath.includes('/')
   const matches = links.filter((link) => {
-    if (!link.targetRelativePath) return false
-    const targetPath = normalizePathForCompare(link.targetRelativePath)
-    return (
-      normalizedPath === targetPath ||
-      normalizedPath.endsWith(`/${targetPath}`) ||
-      (pathHasDirectory && targetPath.endsWith(`/${normalizedPath}`))
-    )
+    const targetPaths = [
+      ...(link.targetRelativePath ? [link.targetRelativePath] : []),
+      ...(link.targetRelativePaths ?? [])
+    ]
+    return targetPaths.some((path) => {
+      const targetPath = normalizePathForCompare(path)
+      return (
+        normalizedPath === targetPath ||
+        normalizedPath.endsWith(`/${targetPath}`) ||
+        (pathHasDirectory && targetPath.endsWith(`/${normalizedPath}`))
+      )
+    })
   })
   return matches.length === 1 ? matches[0] : null
 }
