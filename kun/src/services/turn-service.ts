@@ -199,13 +199,33 @@ export class TurnService {
 
   async interruptTurn(input: { threadId: string; turnId: string; discard?: boolean }): Promise<{ status: TurnStatus }> {
     const controller = this.inflightTurns.get(input.turnId)
-    console.warn(`[kun] interrupt requested thread=${input.threadId} turn=${input.turnId} discard=${input.discard === true} inflight=${Boolean(controller)}`)
-    if (controller) {
-      controller.abort()
-      console.warn(`[kun] interrupt abort signal fired thread=${input.threadId} turn=${input.turnId}`)
-    } else {
-      console.warn(`[kun] interrupt had no inflight controller thread=${input.threadId} turn=${input.turnId}`)
-    }
+    const transition = await this.withThreadMutation(input.threadId, async () => {
+      const current = await this.deps.threadStore.get(input.threadId)
+      if (!current) throw new Error(`thread not found: ${input.threadId}`)
+      const turn = current.turns.find((candidate) => candidate.id === input.turnId)
+      if (!turn) throw new Error(`turn not found: ${input.turnId}`)
+      if (!isActiveTurn(turn)) {
+        throw new TurnConflictError(`turn is not active: ${input.turnId}`)
+      }
+      const turns = current.turns.map((candidate) =>
+        candidate.id === input.turnId
+          ? this.finalizeOpenItems(
+              finishTurn(input.discard ? { ...candidate, items: this.keepUserItems(candidate.items) } : candidate, 'aborted'),
+              'aborted'
+            )
+          : candidate
+      )
+      await this.deps.threadStore.upsert({
+        ...touchThread(current, this.deps.nowIso()),
+        turns,
+        status: threadStatusFromTurns(turns),
+        updatedAt: this.deps.nowIso()
+      })
+      return true
+    })
+    if (!transition) return { status: 'aborted' }
+
+    controller?.abort()
     this.deps.steering.clear(input.turnId)
     this.inflightTurns.delete(input.turnId)
     this.deps.inflight.end(input.turnId)
@@ -219,20 +239,6 @@ export class TurnService {
     } else {
       await this.finalizePersistedOpenItems(input.threadId, input.turnId, 'aborted')
     }
-    await this.upsertThread(input.threadId, (current) => {
-      const turn = current.turns.find((t) => t.id === input.turnId)
-      if (!turn) return current
-      const next = current.turns.map((t) =>
-        t.id === input.turnId
-          ? this.finalizeOpenItems(
-              finishTurn(input.discard ? { ...t, items: this.keepUserItems(t.items) } : t, 'aborted'),
-              'aborted'
-            )
-          : t
-      )
-      return { ...touchThread(current, this.deps.nowIso()), turns: next, status: 'idle' }
-    })
-    console.warn(`[kun] interrupt persisted aborted state thread=${input.threadId} turn=${input.turnId}`)
     return { status: 'aborted' }
   }
 
@@ -390,18 +396,30 @@ export class TurnService {
     details?: unknown
     severity?: RuntimeErrorSeverity
   }): Promise<void> {
+    const transitioned = await this.withThreadMutation(input.threadId, async () => {
+      const current = await this.deps.threadStore.get(input.threadId)
+      if (!current) return false
+      const turn = current.turns.find((candidate) => candidate.id === input.turnId)
+      if (!turn || !isActiveTurn(turn)) return false
+      const turns = current.turns.map((candidate) => {
+        if (candidate.id !== input.turnId) return candidate
+        const finished = this.finalizeOpenItems(finishTurn(candidate, input.status), input.status)
+        return input.error ? { ...finished, error: input.error } : finished
+      })
+      await this.deps.threadStore.upsert({
+        ...touchThread(current, this.deps.nowIso()),
+        turns,
+        status: threadStatusFromTurns(turns),
+        updatedAt: this.deps.nowIso()
+      })
+      return true
+    })
+    if (!transitioned) return
+
     this.inflightTurns.delete(input.turnId)
     this.deps.inflight.end(input.turnId)
     this.deps.steering.clear(input.turnId)
     await this.finalizePersistedOpenItems(input.threadId, input.turnId, input.status)
-    await this.upsertThread(input.threadId, (current) => {
-      const next = current.turns.map((t) => {
-        if (t.id !== input.turnId) return t
-        const finished = this.finalizeOpenItems(finishTurn(t, input.status), input.status)
-        return input.error ? { ...finished, error: input.error } : finished
-      })
-      return { ...touchThread(current, this.deps.nowIso()), turns: next, status: 'idle' }
-    })
     const errorItem = input.error
       ? makeErrorItem({
           id: `item_${input.turnId}_error`,
@@ -677,6 +695,14 @@ export class TurnService {
     return { ...item, status: itemStatus, finishedAt } as TurnItem
   }
 
+}
+
+function isActiveTurn(turn: Turn): boolean {
+  return turn.status === 'queued' || turn.status === 'running'
+}
+
+function threadStatusFromTurns(turns: Turn[]): ThreadStatus {
+  return turns.some(isActiveTurn) ? 'running' : 'idle'
 }
 
 function modelForManualCompaction(input: {

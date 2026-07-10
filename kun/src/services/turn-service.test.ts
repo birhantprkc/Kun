@@ -90,6 +90,57 @@ describe('TurnService startTurn', () => {
     expect(thread?.turns[0]?.status).toBe('running')
   })
 
+  it('rejects cross-thread interrupts and ignores a late loop finish after interrupt', async () => {
+    const sessionStore = new InMemorySessionStore()
+    const threadStore = new InMemoryThreadStore()
+    const eventBus = new InMemoryEventBus()
+    const nowIso = () => '2026-06-18T00:00:00.000Z'
+    const service = new TurnService({
+      threadStore,
+      sessionStore,
+      events: new RuntimeEventRecorder({
+        eventBus,
+        sessionStore,
+        allocateSeq: (threadId) => eventBus.allocateSeq(threadId),
+        nowIso
+      }),
+      inflight: new InflightTracker(),
+      steering: new SteeringQueue(),
+      compactor: new ContextCompactor(),
+      ids: new SequentialIdGenerator(),
+      nowIso
+    })
+    await Promise.all(['thr_owner_a', 'thr_owner_b'].map((id) => threadStore.upsert(createThreadRecord({
+      id,
+      title: id,
+      workspace: '/tmp/workspace',
+      model: 'deepseek-v4-pro'
+    }))))
+    const started = await service.startTurn({
+      threadId: 'thr_owner_b',
+      request: { prompt: 'run', model: 'm' }
+    })
+
+    await expect(service.interruptTurn({
+      threadId: 'thr_owner_a',
+      turnId: started.turnId
+    })).rejects.toThrow(/turn not found/)
+    expect(service.getAbortController(started.turnId)?.aborted).toBe(false)
+
+    await service.interruptTurn({ threadId: 'thr_owner_b', turnId: started.turnId })
+    await service.finishTurn({
+      threadId: 'thr_owner_b',
+      turnId: started.turnId,
+      status: 'completed'
+    })
+
+    const turn = await service.getTurn('thr_owner_b', started.turnId)
+    expect(turn?.status).toBe('aborted')
+    const events = await sessionStore.loadEventsSince('thr_owner_b', 0)
+    expect(events.filter((event) => event.kind === 'turn_aborted')).toHaveLength(1)
+    expect(events.some((event) => event.kind === 'turn_completed')).toBe(false)
+  })
+
   it('persists per-turn provider ids for model routing', async () => {
     const sessionStore = new InMemorySessionStore()
     const threadStore = new InMemoryThreadStore()
