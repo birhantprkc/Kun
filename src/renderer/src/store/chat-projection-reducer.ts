@@ -226,6 +226,20 @@ export function reduceChatProjection(
         error: context.clearRecoveringError(state.error)
       }
     }
+    case 'approval_status_changed': {
+      const event = action.payload
+      return {
+        blocks: state.blocks.map((block) =>
+          block.kind === 'approval' && block.approvalId === event.approvalId
+            ? {
+                ...block,
+                status: event.status,
+                errorMessage: event.errorMessage ?? block.errorMessage
+              }
+            : block
+        )
+      }
+    }
     case 'user_input_requested': {
       const req = action.payload
       const existing = state.blocks.find(

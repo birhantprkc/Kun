@@ -101,6 +101,30 @@ describe('chat projection reducer', () => {
     expect(projected.blocks).toHaveLength(2)
   })
 
+  it('retires a pending approval after its runtime resolution is projected', () => {
+    const projected = project(state(), [
+      {
+        type: 'approval_received',
+        payload: { approvalId: 'approval_1', summary: 'Run tests' }
+      },
+      {
+        type: 'approval_status_changed',
+        payload: {
+          approvalId: 'approval_1',
+          status: 'expired',
+          errorMessage: 'turn aborted while awaiting approval'
+        }
+      }
+    ])
+
+    expect(projected.blocks).toContainEqual(expect.objectContaining({
+      kind: 'approval',
+      approvalId: 'approval_1',
+      status: 'expired',
+      errorMessage: 'turn aborted while awaiting approval'
+    }))
+  })
+
   it('reconciles a persisted completion through the same projection reducer', () => {
     const initial = {
       ...state(),
