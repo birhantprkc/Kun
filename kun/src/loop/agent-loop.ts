@@ -231,6 +231,27 @@ type TurnFailure = {
   severity?: RuntimeErrorSeverity
 }
 
+/**
+ * Model providers commonly emit token-sized deltas. Accumulating those with
+ * `text += delta` copies the whole response on every chunk; retain pieces and
+ * materialize one string only when a downstream operation actually needs it.
+ */
+class StreamTextAccumulator {
+  private readonly parts: string[] = []
+  private joined: string | undefined
+
+  append(text: string): void {
+    if (!text) return
+    this.parts.push(text)
+    this.joined = undefined
+  }
+
+  get value(): string {
+    if (this.joined === undefined) this.joined = this.parts.join('')
+    return this.joined
+  }
+}
+
 type ModelClientDiagnostics = {
   provider?: string
   providerBaseUrl?: string
@@ -1040,6 +1061,11 @@ export class AgentLoop {
       this.opts.threadStore.get(threadId),
       this.opts.turns.getTurn(threadId, turnId)
     ])
+    // A delete/interrupt can win while a model step is waiting for its prior
+    // I/O. Do not fall back to empty workspace/default settings: that would
+    // let a stale continuation issue a new request or dispatch a tool after
+    // its owning thread/turn no longer exists.
+    if (signal.aborted || !thread || !turn) return 'aborted'
     await this.recordPipelineStage(threadId, turnId, 'input_received', { stepIndex })
     const candidatePlanContext = turn?.guiPlan
       ? { ...turn.guiPlan, turnId }
@@ -1385,8 +1411,8 @@ export class AgentLoop {
         sentInputTokens: estimateModelRequestInputTokens(request)
       })
     }
-    const textAccumulator: { value: string } = { value: '' }
-    const reasoningAccumulator: { value: string } = { value: '' }
+    const textAccumulator = new StreamTextAccumulator()
+    const reasoningAccumulator = new StreamTextAccumulator()
     let textItemId = ''
     let reasoningItemId = ''
     const completedToolCalls: ToolCallLike[] = []
@@ -1458,7 +1484,7 @@ export class AgentLoop {
       switch (chunk.kind) {
         case 'assistant_text_delta':
           textItemId ||= this.opts.ids.next('item_text')
-          textAccumulator.value += chunk.text
+          textAccumulator.append(chunk.text)
           await this.opts.events.record({
             kind: 'assistant_text_delta',
             threadId,
@@ -1475,7 +1501,7 @@ export class AgentLoop {
           break
         case 'assistant_reasoning_delta':
           reasoningItemId ||= this.opts.ids.next('item_reasoning')
-          reasoningAccumulator.value += chunk.text
+          reasoningAccumulator.append(chunk.text)
           await this.opts.events.record({
             kind: 'assistant_reasoning_delta',
             threadId,
@@ -1569,7 +1595,7 @@ export class AgentLoop {
           await writeFile(absolutePath, Buffer.from(chunk.imageBase64, 'base64'))
           const imageMarkdown = `\n![generated image](${relativePath})\n`
           textItemId ||= this.opts.ids.next('item_text')
-          textAccumulator.value += imageMarkdown
+          textAccumulator.append(imageMarkdown)
           await this.opts.events.record({
             kind: 'assistant_text_delta',
             threadId,

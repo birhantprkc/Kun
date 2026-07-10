@@ -42,6 +42,7 @@ import type { ModelClient } from '../../ports/model-client.js'
 import type { RolesConfig } from '../../config/kun-config.js'
 import type { ImmutablePrefix } from '../../cache/immutable-prefix.js'
 import type { PublisherTrustStore } from '../../supplychain/publisher-trust-store.js'
+import type { ThreadEventStreamRegistry } from '../thread-event-stream-registry.js'
 
 export type RuntimeToolDiagnostics = {
   providers: ToolProviderPolicy[]
@@ -72,6 +73,8 @@ export type ServerRuntime = {
   eventBus: EventBus
   sessionStore: SessionStore
   events: RuntimeEventRecorder
+  /** Active SSE streams, so a successful thread delete can close them. */
+  eventStreamRegistry?: ThreadEventStreamRegistry
   /** Optional troubleshooting buffer of the most recent LLM rounds (in-memory). */
   llmDebug?: LlmDebugRecorder
   approvalGate: ApprovalGate

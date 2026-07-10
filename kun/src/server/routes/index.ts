@@ -311,6 +311,7 @@ export function buildRouter(runtime: ServerRuntime): Router {
       threadId: ctx.params.id,
       eventBus: runtime.eventBus,
       sessionStore: runtime.sessionStore,
+      streamRegistry: runtime.eventStreamRegistry,
       sinceSeq
     })
   })

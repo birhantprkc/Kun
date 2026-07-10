@@ -4,6 +4,7 @@ import {
 } from '../contracts/events.js'
 import type { EventBus } from '../ports/event-bus.js'
 import type { SessionStore } from '../ports/session-store.js'
+import type { ThreadLifecycleFence, ThreadLifecycleLease } from './thread-lifecycle-fence.js'
 
 type RuntimeEventWithoutStamp<Event extends RuntimeEvent> = Omit<Event, 'seq' | 'timestamp'> &
   Partial<Pick<Event, 'seq' | 'timestamp'>>
@@ -20,6 +21,8 @@ export type RuntimeEventRecorderOptions = {
   allocateSeq: (threadId: string) => number
   nowIso: () => string
   observers?: RuntimeEventObserver[]
+  /** Optional per-thread deletion fence used by serve persistence. */
+  lifecycleFence?: ThreadLifecycleFence
 }
 
 export type RuntimeEventObserver = {
@@ -49,21 +52,47 @@ export class RuntimeEventRecorder {
   }
 
   async record(draft: RuntimeEventDraft): Promise<RuntimeEvent> {
-    return this.enqueue(draft.threadId, async () => this.recordCommitted(draft))
+    // Capture a generation lease before queueing. A record already waiting
+    // behind another event must stay stale even if the same id is later
+    // recreated after deletion.
+    const lease = this.options.lifecycleFence?.acquire(draft.threadId) ?? undefined
+    if (this.options.lifecycleFence && !lease) {
+      return this.makeEvent(draft)
+    }
+    try {
+      return await this.enqueue(draft.threadId, async () => this.recordCommitted(draft, lease))
+    } finally {
+      lease?.release()
+    }
   }
 
-  private async recordCommitted(draft: RuntimeEventDraft): Promise<RuntimeEvent> {
+  private async recordCommitted(
+    draft: RuntimeEventDraft,
+    lease?: ThreadLifecycleLease
+  ): Promise<RuntimeEvent> {
+    const event = await this.makeEvent(draft)
+    // Do not persist (or publish) a draft from an expired generation. It is
+    // still returned for caller compatibility; lifecycle events are commands,
+    // not a durable acknowledgement.
+    if (lease && !lease.isCurrent()) return event
+    await this.options.sessionStore.appendEvent(event.threadId, event)
+    // `appendEvent` can have started before a close. The deletion path drains
+    // that write before unlinking files; this second check is what prevents an
+    // already-committed old event from escaping through live SSE afterwards.
+    if (lease && !lease.isCurrent()) return event
+    this.options.eventBus.publish(event)
+    await this.notifyObservers(event, lease)
+    return event
+  }
+
+  private async makeEvent(draft: RuntimeEventDraft): Promise<RuntimeEvent> {
     const seq = draft.seq ?? (await this.nextSeq(draft.threadId))
     this.noteIssuedSeq(draft.threadId, seq)
-    const event = RuntimeEventSchema.parse({
+    return RuntimeEventSchema.parse({
       ...draft,
       seq,
       timestamp: draft.timestamp ?? this.options.nowIso()
     })
-    await this.options.sessionStore.appendEvent(event.threadId, event)
-    this.options.eventBus.publish(event)
-    await this.notifyObservers(event)
-    return event
   }
 
   private async enqueue<T>(threadId: string, operation: () => Promise<T>): Promise<T> {
@@ -110,8 +139,9 @@ export class RuntimeEventRecorder {
     }
   }
 
-  private async notifyObservers(event: RuntimeEvent): Promise<void> {
+  private async notifyObservers(event: RuntimeEvent, lease?: ThreadLifecycleLease): Promise<void> {
     for (const observer of this.options.observers ?? []) {
+      if (lease && !lease.isCurrent()) return
       try {
         await observer.record(event)
       } catch (error) {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RuntimeEvent } from '../src/contracts/events.js'
 import type { EventBus } from '../src/ports/event-bus.js'
 import type { SessionStore } from '../src/ports/session-store.js'
+import { ThreadEventStreamRegistry } from '../src/server/thread-event-stream-registry.js'
 import {
   buildEventStreamResponse,
   HEARTBEAT_INTERVAL_MS,
@@ -99,6 +100,50 @@ describe('event stream replay', () => {
     const reader = response.body!.getReader()
     const first = await reader.read()
     expect(new TextDecoder().decode(first.value)).toContain('SSE replay overflow')
+    await expect(reader.read()).resolves.toMatchObject({ done: true })
+  })
+
+  it('actively closes a deleted thread\'s stream while durable replay is in flight', async () => {
+    vi.useFakeTimers()
+    let releaseReplay: (() => void) | undefined
+    let notifySubscribed: (() => void) | undefined
+    let notifyReplayStarted: (() => void) | undefined
+    let unsubscribed = false
+    const subscribed = new Promise<void>((resolve) => { notifySubscribed = resolve })
+    const replayStarted = new Promise<void>((resolve) => { notifyReplayStarted = resolve })
+    const eventBus: EventBus = {
+      publish: () => undefined,
+      subscribe: () => {
+        notifySubscribed?.()
+        return () => { unsubscribed = true }
+      },
+      snapshotSince: () => [], highestSeq: () => 0, reset: () => undefined
+    }
+    const sessionStore = {
+      highestSeq: async () => 0,
+      loadEventsSince: async () => new Promise<RuntimeEvent[]>((resolveReplay) => {
+        releaseReplay = () => resolveReplay([])
+        notifyReplayStarted?.()
+      })
+    } as unknown as SessionStore
+    const streamRegistry = new ThreadEventStreamRegistry()
+    const response = buildEventStreamResponse({
+      request: new Request('http://localhost/v1/threads/thr_events/events?since_seq=0'),
+      threadId: 'thr_events',
+      eventBus,
+      sessionStore,
+      streamRegistry
+    })
+
+    await subscribed
+    await replayStarted
+    streamRegistry.closeThread('thr_events')
+    expect(unsubscribed).toBe(true)
+    releaseReplay?.()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(vi.getTimerCount()).toBe(0)
+
+    const reader = response.body!.getReader()
     await expect(reader.read()).resolves.toMatchObject({ done: true })
   })
 

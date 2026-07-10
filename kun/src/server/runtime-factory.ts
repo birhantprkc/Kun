@@ -4,6 +4,7 @@ import { buildRouter } from './routes/index.js'
 import type { ServerRuntime } from './routes/server-runtime.js'
 import { startNodeHttpServer, type NodeHttpServerHandle } from './node-http-server.js'
 import { isLoopbackHost } from './loopback-host.js'
+import { ThreadEventStreamRegistry } from './thread-event-stream-registry.js'
 import { FileAttachmentStore } from '../attachments/attachment-store.js'
 import { InMemoryApprovalGate } from '../adapters/in-memory-approval-gate.js'
 import { InMemoryUserInputGate } from '../adapters/in-memory-user-input-gate.js'
@@ -76,6 +77,11 @@ import type { SessionStore } from '../ports/session-store.js'
 import type { ThreadStore } from '../ports/thread-store.js'
 import { KUN_SYSTEM_PROMPT } from '../prompt/kun-system-prompt.js'
 import { RuntimeEventRecorder } from '../services/runtime-event-recorder.js'
+import {
+  LifecycleFencedSessionStore,
+  LifecycleFencedThreadStore,
+  ThreadLifecycleFence
+} from '../services/thread-lifecycle-fence.js'
 import { LlmDebugRecorder } from '../services/llm-debug-recorder.js'
 import { ThreadService } from '../services/thread-service.js'
 import { TurnService } from '../services/turn-service.js'
@@ -167,13 +173,20 @@ export async function createKunServeRuntime(
   await mkdir(options.dataDir, { recursive: true, mode: 0o700 })
   let activeOptions: KunServeRuntimeOptions = { ...options }
   const eventBus = new InMemoryEventBus()
+  const eventStreamRegistry = new ThreadEventStreamRegistry()
   const stores = await createPersistentStores({
     dataDir: options.dataDir,
     storage: options.storage,
     nowIso: () => new Date().toISOString()
   })
-  const sessionStore = stores.sessionStore
-  const threadStore = stores.threadStore
+  // Persisted thread/session files are shared by several asynchronous loops.
+  // Put a lifecycle fence in front of every non-destructive write so a deleted
+  // thread cannot be recreated by an old turn that finishes late.
+  const rawSessionStore = stores.sessionStore
+  const rawThreadStore = stores.threadStore
+  const lifecycleFence = new ThreadLifecycleFence()
+  const sessionStore: SessionStore = new LifecycleFencedSessionStore(rawSessionStore, lifecycleFence)
+  const threadStore: ThreadStore = new LifecycleFencedThreadStore(rawThreadStore, lifecycleFence)
   const approvalGate = new InMemoryApprovalGate()
   const userInputGate = new InMemoryUserInputGate()
   const workspaceInspector = new LocalWorkspaceInspector()
@@ -197,6 +210,7 @@ export async function createKunServeRuntime(
     sessionStore,
     allocateSeq,
     nowIso,
+    lifecycleFence,
     ...(agentObservability ? { observers: [agentObservability] } : {})
   })
   let prefix = createImmutablePrefix({
@@ -207,15 +221,22 @@ export async function createKunServeRuntime(
       'system: keep the stable Kun prefix byte-stable for prompt-cache reuse'
     ]
   })
+  let abortThreadExecution: ((threadId: string) => number) | undefined
   const threadService = new ThreadService({
     threadStore,
+    deleteThreadStore: rawThreadStore,
     sessionStore,
     events,
     ids,
     nowIso,
     defaultApprovalPolicy: activeOptions.approvalPolicy,
     defaultSandboxMode: activeOptions.sandboxMode,
+    lifecycleFence,
+    onDeleting: (threadId) => {
+      abortThreadExecution?.(threadId)
+    },
     onDeleted: (threadId) => {
+      eventStreamRegistry.closeThread(threadId)
       usageService.reset(threadId)
       events.clearThread(threadId)
       eventBus.clearThread(threadId)
@@ -267,9 +288,11 @@ export async function createKunServeRuntime(
     defaultModel: options.model,
     contextCompaction: options.contextCompaction,
     maxConcurrentTurns: activeOptions.runtime?.turnLimits?.maxConcurrentTurns,
+    lifecycleFence,
     ids,
     nowIso
   })
+  abortThreadExecution = (threadId) => turnService.abortThreadExecution(threadId)
   const backgroundShellRuntime = new BackgroundShellRuntime({
     events,
     threadStore,
@@ -933,6 +956,7 @@ export async function createKunServeRuntime(
     eventBus,
     sessionStore,
     events,
+    eventStreamRegistry,
     llmDebug,
     approvalGate,
 	    userInputGate,
@@ -1023,6 +1047,7 @@ export async function createKunServeRuntime(
     shutdown: async () => {
       try {
         shuttingDown = true
+        eventStreamRegistry.closeAll()
         loop.shutdownGoalResume()
         await backgroundShellRuntime.shutdown()
         await turnService.interruptActiveTurns()

@@ -173,9 +173,14 @@ describe('runtime factory usage carryover', () => {
         { workspace: '/tmp/workspace', model: 'model-before', mode: 'agent' },
         { id: threadId }
       )
+      const eventStreamRegistry = runtime.eventStreamRegistry
+      if (!eventStreamRegistry) throw new Error('expected event stream registry')
+      const closeStream = vi.fn()
+      eventStreamRegistry.register(threadId, closeStream)
       runtime.usageService.record(threadId, usage({ promptTokens: 10, completionTokens: 5 }))
 
       expect(await runtime.threadService.delete(threadId)).toBe(true)
+      expect(closeStream).toHaveBeenCalledTimes(1)
       expect(runtime.eventBus.snapshotSince(threadId, 0)).toEqual([])
       expect(runtime.usageService.forThread(threadId).totalTokens).toBe(0)
 

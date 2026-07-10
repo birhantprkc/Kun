@@ -334,6 +334,7 @@ export function createAgentSdkRuntime(deps: AgentSdkRuntimeFactoryDeps): AgentSd
       const thread = await deps.threadStore.get(threadId)
       if (!thread) return null
       const turn = thread.turns.find((candidate) => candidate.id === turnId)
+      if (!turn) return null
       const items = await deps.sessionStore.loadItems(threadId)
       const userItem = [...items]
         .reverse()
@@ -439,13 +440,16 @@ export function createAgentSdkRuntime(deps: AgentSdkRuntimeFactoryDeps): AgentSd
     async executeKunTool(threadId, turnId, toolName, args, signal): Promise<KunToolResult> {
       const thread = await deps.threadStore.get(threadId)
       const turn = thread?.turns.find((candidate) => candidate.id === turnId)
+      if (!thread || !turn || signal?.aborted) {
+        return { output: 'turn is no longer active; tool execution was cancelled', isError: true }
+      }
       // Re-resolve plan context so create_plan can write to its reserved path.
-      const plan = thread ? resolveTurnPlanContext(thread, turnId) : undefined
-      const approvalPolicy = thread?.approvalPolicy ?? deps.defaultApprovalPolicy
-      const sandboxMode = thread?.sandboxMode ?? deps.defaultSandboxMode
+      const plan = resolveTurnPlanContext(thread, turnId)
+      const approvalPolicy = thread.approvalPolicy ?? deps.defaultApprovalPolicy
+      const sandboxMode = thread.sandboxMode ?? deps.defaultSandboxMode
       const toolSignal = signal ?? new AbortController().signal
       // Real per-call signal so an interactive user_input cancels on turn abort.
-      const ctx = toolContext(threadId, turnId, thread?.workspace ?? process.cwd(), {
+      const ctx = toolContext(threadId, turnId, thread.workspace, {
         ...(plan ?? {}),
         ...(turn?.guiDesignCanvas ? { guiDesignCanvas: true } : {}),
         ...(sandboxMode ? { sandboxMode } : {}),

@@ -226,6 +226,49 @@ describe('createAgentSdkRuntime turn context', () => {
     expect(context?.contextInstructions?.join('\n')).toContain('COMPLETE MULTI-SCREEN EXPERIENCE')
   })
 
+  test('does not fall back to the process workspace when a thread or turn has disappeared', async () => {
+    const runtime = createAgentSdkRuntime({
+      registry: {
+        resolveTool: () => {
+          throw new Error('a stale turn must not resolve a tool')
+        }
+      } as never,
+      turns: {} as never,
+      sessionStore: {} as never,
+      threadStore: { get: async () => null } as never,
+      events: {} as never,
+      ids: { next: (prefix) => prefix },
+      prefix: { systemPrompt: '' },
+      providerConfigs: {},
+      agentSdkProviderIds: new Set(),
+      defaultApprovalPolicy: 'auto'
+    })
+    const deps = (runtime as unknown as {
+      deps: {
+        loadTurnContext(threadId: string, turnId: string): Promise<unknown>
+        executeKunTool(
+          threadId: string,
+          turnId: string,
+          toolName: string,
+          args: Record<string, unknown>,
+          signal?: AbortSignal
+        ): Promise<{ output: unknown; isError: boolean }>
+      }
+    }).deps
+
+    await expect(deps.loadTurnContext('deleted-thread', 'deleted-turn')).resolves.toBeNull()
+    await expect(deps.executeKunTool(
+      'deleted-thread',
+      'deleted-turn',
+      'bash',
+      {},
+      new AbortController().signal
+    )).resolves.toEqual({
+      output: 'turn is no longer active; tool execution was cancelled',
+      isError: true
+    })
+  })
+
   test('uses the thread approval policy to gate SDK built-in tools', async () => {
     const events: Array<{ kind: string; approvalPolicy?: string }> = []
     const runtime = createAgentSdkRuntime({
@@ -296,7 +339,12 @@ describe('createAgentSdkRuntime turn context', () => {
       sessionStore: {
         loadEventsSince: async () => [{ kind: 'user_input_resolved', inputId: 'in_sdk' }]
       } as never,
-      threadStore: { get: async () => threadWith({ workspace: '/ws' }) } as never,
+      threadStore: {
+        get: async () => threadWith({
+          workspace: '/ws',
+          turns: [{ id: 'tn', prompt: 'ask' } as ThreadRecord['turns'][number]]
+        })
+      } as never,
       events: { record: async (event: { kind: string; inputId?: string }) => { events.push(event) } } as never,
       ids: { next: (prefix) => prefix },
       prefix: { systemPrompt: '' },

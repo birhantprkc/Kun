@@ -2,6 +2,7 @@ import { encodeSseEvent } from '../sse.js'
 import type { EventBus } from '../../ports/event-bus.js'
 import type { SessionStore } from '../../ports/session-store.js'
 import type { RuntimeEvent } from '../../contracts/events.js'
+import type { ThreadEventStreamRegistry } from '../thread-event-stream-registry.js'
 
 export const HEARTBEAT_INTERVAL_MS = 15_000
 export const DEFAULT_MAX_PERSISTED_REPLAY_EVENTS = 256
@@ -39,6 +40,8 @@ export function buildEventStreamResponse(input: {
   threadId: string
   eventBus: EventBus
   sessionStore: SessionStore
+  /** Runtime-owned registry used to close streams after a thread is deleted. */
+  streamRegistry?: ThreadEventStreamRegistry
   sinceSeq?: number
   /** Internal test/runtime tuning; the HTTP cursor contract remains unchanged. */
   replayLimits?: {
@@ -52,6 +55,8 @@ export function buildEventStreamResponse(input: {
   const sinceSeq = input.sinceSeq ?? parseEventCursor(input.request) ?? 0
   const encoder = new TextEncoder()
   let unsubscribe: (() => void) | undefined
+  let unregisterStream: (() => void) | undefined
+  let closeStream: (() => void) | undefined
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined
   let closed = false
   const replayLimits = {
@@ -72,7 +77,12 @@ export function buildEventStreamResponse(input: {
       const close = () => {
         if (closed) return
         closed = true
+        input.request.signal.removeEventListener('abort', close)
+        closeStream = undefined
         unsubscribe?.()
+        unsubscribe = undefined
+        unregisterStream?.()
+        unregisterStream = undefined
         if (heartbeatTimer) {
           clearInterval(heartbeatTimer)
           heartbeatTimer = undefined
@@ -83,11 +93,13 @@ export function buildEventStreamResponse(input: {
           // Already closed; ignore.
         }
       }
+      closeStream = close
       input.request.signal.addEventListener('abort', close)
       if (input.request.signal.aborted) {
         close()
         return
       }
+      unregisterStream = input.streamRegistry?.register(input.threadId, close)
       try {
         let lastDeliveredSeq = sinceSeq
         let replaying = true
@@ -142,6 +154,7 @@ export function buildEventStreamResponse(input: {
           sinceSeq,
           replayLimits.maxRecordBytes
         )) {
+          if (closed) return
           const frame = frameFor(event)
           const bytes = frame.byteLength
           // Permit one bounded record larger than the page byte target, so a
@@ -160,6 +173,10 @@ export function buildEventStreamResponse(input: {
           }
           if (closed) return
         }
+        // Deletion/client cancellation can close the response while an async
+        // persisted replay is awaiting I/O. Do not create a heartbeat timer
+        // after that response has already been released.
+        if (closed) return
         if (replayOverflowed) {
           controller.enqueue(encoder.encode(
             'event: error\ndata: {"message":"SSE replay overflow; reconnect from the last event cursor."}\n\n'
@@ -207,19 +224,31 @@ export function buildEventStreamResponse(input: {
           }
         }, HEARTBEAT_INTERVAL_MS)
       } catch (error) {
-        controller.enqueue(
-          encoder.encode(
-            `event: error\ndata: ${JSON.stringify({
-              message: error instanceof Error ? error.message : String(error)
-            })}\n\n`
+        // A deletion can close the response while persisted replay is still
+        // awaiting I/O. Do not try to enqueue an error onto that closed stream.
+        if (closed) return
+        try {
+          controller.enqueue(
+            encoder.encode(
+              `event: error\ndata: ${JSON.stringify({
+                message: error instanceof Error ? error.message : String(error)
+              })}\n\n`
+            )
           )
-        )
+        } catch {
+          // The consumer may have closed between the guard and enqueue.
+        }
         close()
       }
     },
     cancel() {
       closed = true
+      if (closeStream) input.request.signal.removeEventListener('abort', closeStream)
+      closeStream = undefined
       unsubscribe?.()
+      unsubscribe = undefined
+      unregisterStream?.()
+      unregisterStream = undefined
       if (heartbeatTimer) clearInterval(heartbeatTimer)
     }
   })

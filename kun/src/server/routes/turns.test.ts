@@ -13,6 +13,53 @@ import type { JsonResponse } from '../response.js'
 import { startTurn } from './turns.js'
 
 describe('POST /v1/threads/:id/turns admission', () => {
+  it('maps an archived thread to a conflict without creating a turn', async () => {
+    const threadStore = new InMemoryThreadStore()
+    const sessionStore = new InMemorySessionStore()
+    const eventBus = new InMemoryEventBus()
+    const nowIso = () => '2026-06-18T00:00:00.000Z'
+    const turns = new TurnService({
+      threadStore,
+      sessionStore,
+      events: new RuntimeEventRecorder({
+        eventBus,
+        sessionStore,
+        allocateSeq: (threadId) => eventBus.allocateSeq(threadId),
+        nowIso
+      }),
+      inflight: new InflightTracker(),
+      steering: new SteeringQueue(),
+      compactor: new ContextCompactor(),
+      ids: new SequentialIdGenerator(),
+      nowIso
+    })
+    const threadId = 'thr_route_archived'
+    await threadStore.upsert(createThreadRecord({
+      id: threadId,
+      title: 'Archived route',
+      workspace: '/tmp/workspace',
+      model: 'deepseek-v4-pro',
+      status: 'archived'
+    }))
+
+    const response = await startTurn(
+      turns,
+      threadId,
+      new Request(`http://kun.local/v1/threads/${threadId}/turns`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: 'must be rejected' })
+      })
+    ) as JsonResponse
+
+    expect(response.status).toBe(409)
+    expect(JSON.parse(response.body)).toEqual({
+      code: 'conflict',
+      message: `thread is archived: ${threadId}`
+    })
+    expect((await threadStore.get(threadId))?.turns).toEqual([])
+  })
+
   it('maps exhausted global admission capacity to a structured 429 response', async () => {
     const threadStore = new InMemoryThreadStore()
     const sessionStore = new InMemorySessionStore()

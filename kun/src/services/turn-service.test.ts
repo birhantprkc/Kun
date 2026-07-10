@@ -17,6 +17,7 @@ import { emptyUsageSnapshot } from '../contracts/usage.js'
 import type { TurnItem } from '../contracts/items.js'
 import { RuntimeEventRecorder } from './runtime-event-recorder.js'
 import { TurnCapacityError, TurnConflictError, TurnService } from './turn-service.js'
+import { ThreadService } from './thread-service.js'
 import { UsageService } from './usage-service.js'
 
 class SummaryModel implements ModelClient {
@@ -102,6 +103,125 @@ describe('TurnService startTurn', () => {
     expect(thread?.turns[0]?.status).toBe('running')
     expect(await service.interruptActiveTurns()).toBe(1)
     expect((await threadStore.get(threadId))?.turns[0]?.status).toBe('aborted')
+  })
+
+  it('rejects an archived thread before creating a turn or consuming runtime capacity', async () => {
+    const sessionStore = new InMemorySessionStore()
+    const threadStore = new InMemoryThreadStore()
+    const eventBus = new InMemoryEventBus()
+    const nowIso = () => '2026-06-18T00:00:00.000Z'
+    const events = new RuntimeEventRecorder({
+      eventBus,
+      sessionStore,
+      allocateSeq: (threadId) => eventBus.allocateSeq(threadId),
+      nowIso
+    })
+    const service = new TurnService({
+      threadStore,
+      sessionStore,
+      events,
+      inflight: new InflightTracker(),
+      steering: new SteeringQueue(),
+      compactor: new ContextCompactor(),
+      maxConcurrentTurns: 1,
+      ids: new SequentialIdGenerator(),
+      nowIso
+    })
+    const threadId = 'thr_archived_start'
+    const admittedThreadId = 'thr_archived_start_capacity'
+    await Promise.all([threadId, admittedThreadId].map((id) => threadStore.upsert(createThreadRecord({
+      id,
+      title: id === threadId ? 'Archived thread' : 'Capacity check',
+      workspace: '/tmp/workspace',
+      model: 'deepseek-v4-pro',
+      ...(id === threadId ? { status: 'archived' as const } : {})
+    }))))
+
+    await expect(service.startTurn({
+      threadId,
+      request: { prompt: 'must not run', model: 'm' }
+    })).rejects.toBeInstanceOf(TurnConflictError)
+
+    expect((await threadStore.get(threadId))?.turns).toEqual([])
+    expect(await sessionStore.loadItems(threadId)).toEqual([])
+    expect(await sessionStore.loadEventsSince(threadId, 0)).toEqual([])
+    const admitted = await service.startTurn({
+      threadId: admittedThreadId,
+      request: { prompt: 'capacity was not consumed', model: 'm' }
+    })
+    await service.interruptTurn({ threadId: admittedThreadId, turnId: admitted.turnId })
+  })
+
+  it('keeps archival as an overlay when active turns finish or are interrupted', async () => {
+    const sessionStore = new InMemorySessionStore()
+    const threadStore = new InMemoryThreadStore()
+    const eventBus = new InMemoryEventBus()
+    const nowIso = () => '2026-06-18T00:00:00.000Z'
+    const events = new RuntimeEventRecorder({
+      eventBus,
+      sessionStore,
+      allocateSeq: (threadId) => eventBus.allocateSeq(threadId),
+      nowIso
+    })
+    const ids = new SequentialIdGenerator()
+    const turns = new TurnService({
+      threadStore,
+      sessionStore,
+      events,
+      inflight: new InflightTracker(),
+      steering: new SteeringQueue(),
+      compactor: new ContextCompactor(),
+      ids,
+      nowIso
+    })
+    const threads = new ThreadService({
+      threadStore,
+      sessionStore,
+      events,
+      ids,
+      nowIso
+    })
+    const finishedThreadId = 'thr_archived_finish'
+    const interruptedThreadId = 'thr_archived_interrupt'
+    await Promise.all([finishedThreadId, interruptedThreadId].map((id) => threadStore.upsert(createThreadRecord({
+      id,
+      title: id,
+      workspace: '/tmp/workspace',
+      model: 'deepseek-v4-pro'
+    }))))
+
+    const finishing = await turns.startTurn({
+      threadId: finishedThreadId,
+      request: { prompt: 'finish after archival', model: 'm' }
+    })
+    await threads.update(finishedThreadId, { status: 'archived' })
+    await turns.finishTurn({
+      threadId: finishedThreadId,
+      turnId: finishing.turnId,
+      status: 'completed'
+    })
+
+    const finished = await threadStore.get(finishedThreadId)
+    expect(finished?.status).toBe('archived')
+    expect(finished?.turns.find((turn) => turn.id === finishing.turnId)?.status).toBe('completed')
+    await expect(turns.startTurn({
+      threadId: finishedThreadId,
+      request: { prompt: 'still archived', model: 'm' }
+    })).rejects.toBeInstanceOf(TurnConflictError)
+
+    const interrupting = await turns.startTurn({
+      threadId: interruptedThreadId,
+      request: { prompt: 'interrupt after archival', model: 'm' }
+    })
+    await threads.update(interruptedThreadId, { status: 'archived' })
+    await turns.interruptTurn({
+      threadId: interruptedThreadId,
+      turnId: interrupting.turnId
+    })
+
+    const interrupted = await threadStore.get(interruptedThreadId)
+    expect(interrupted?.status).toBe('archived')
+    expect(interrupted?.turns.find((turn) => turn.id === interrupting.turnId)?.status).toBe('aborted')
   })
 
   it('caps active turns across threads before persistence and releases slots when they settle', async () => {

@@ -32,6 +32,7 @@ import type { RuntimeEventRecorder } from './runtime-event-recorder.js'
 import type { UsageService } from './usage-service.js'
 import { createImmutablePrefix } from '../cache/immutable-prefix.js'
 import { withThreadStoreMutation } from './thread-mutation-coordinator.js'
+import type { ThreadLifecycleFence } from './thread-lifecycle-fence.js'
 
 export type TurnServiceDeps = {
   threadStore: ThreadStore
@@ -47,6 +48,8 @@ export type TurnServiceDeps = {
   contextCompaction?: ContextCompactionConfig
   /** Maximum number of active turns this in-process runtime may admit. */
   maxConcurrentTurns?: number
+  /** Reject turn admission while this thread is being destructively removed. */
+  lifecycleFence?: ThreadLifecycleFence
   ids: IdGenerator
   nowIso: () => string
 }
@@ -105,8 +108,17 @@ export class TurnService {
     let attemptedTurnId: string | undefined
     try {
       const started = await this.withThreadMutation(input.threadId, async () => {
+        if (this.deps.lifecycleFence?.isClosing(input.threadId)) {
+          throw new TurnConflictError(`thread is being deleted: ${input.threadId}`)
+        }
         const thread = await this.deps.threadStore.get(input.threadId)
         if (!thread) throw new Error(`thread not found: ${input.threadId}`)
+        // Archival is an overlay on the execution-derived thread state. It
+        // deliberately permits an already-running turn to settle, but it
+        // must not admit a new one while the thread remains archived.
+        if (thread.status === 'archived') {
+          throw new TurnConflictError(`thread is archived: ${input.threadId}`)
+        }
         if (thread.turns.some((turn) => turn.status === 'queued' || turn.status === 'running')) {
           throw new TurnConflictError(`thread already has an active turn: ${input.threadId}`)
         }
@@ -277,7 +289,7 @@ export class TurnService {
         await this.deps.threadStore.upsert({
           ...touchThread(current, this.deps.nowIso()),
           turns,
-          status: threadStatusFromTurns(turns),
+          status: threadStatusAfterTurnTransition(current.status, turns),
           updatedAt: this.deps.nowIso()
         })
         return true
@@ -485,7 +497,7 @@ export class TurnService {
         await this.deps.threadStore.upsert({
           ...touchThread(current, this.deps.nowIso()),
           turns,
-          status: threadStatusFromTurns(turns),
+          status: threadStatusAfterTurnTransition(current.status, turns),
           updatedAt: this.deps.nowIso()
         })
         return true
@@ -541,6 +553,23 @@ export class TurnService {
     if (!controller || controller.signal.aborted) return false
     controller.abort()
     return true
+  }
+
+  /**
+   * Abort only the active executions owned by one thread. Persistence is not
+   * touched here because delete has already closed the lifecycle fence and
+   * will remove the thread once writers drain.
+   */
+  abortThreadExecution(threadId: string): number {
+    let aborted = 0
+    for (const [turnId, ownerThreadId] of this.admittedTurnThreads) {
+      if (ownerThreadId !== threadId) continue
+      const controller = this.inflightTurns.get(turnId)
+      if (!controller || controller.signal.aborted) continue
+      controller.abort()
+      aborted += 1
+    }
+    return aborted
   }
 
   /**
@@ -809,6 +838,15 @@ function isActiveTurn(turn: Turn): boolean {
 
 function threadStatusFromTurns(turns: Turn[]): ThreadStatus {
   return turns.some(isActiveTurn) ? 'running' : 'idle'
+}
+
+/**
+ * `archived` is a visibility/lifecycle overlay rather than a turn-derived
+ * execution state. A turn may finish or be interrupted after archival, but
+ * that settlement must not implicitly unarchive the thread.
+ */
+function threadStatusAfterTurnTransition(currentStatus: ThreadStatus, turns: Turn[]): ThreadStatus {
+  return currentStatus === 'archived' ? 'archived' : threadStatusFromTurns(turns)
 }
 
 function normalizeMaxConcurrentTurns(value: number | undefined): number {

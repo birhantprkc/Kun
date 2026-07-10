@@ -25,6 +25,7 @@ import { createThreadRecord, toThreadSummary, touchThread } from '../domain/thre
 import type { AgentSession } from '../domain/session.js'
 import { repairModelHistoryItems } from '../domain/model-history-repair.js'
 import type { RuntimeEventRecorder } from './runtime-event-recorder.js'
+import type { ThreadLifecycleFence } from './thread-lifecycle-fence.js'
 import { withFileMutationQueue } from '../adapters/tool/file-mutation-queue.js'
 import { withThreadStoreMutation } from './thread-mutation-coordinator.js'
 import { DEFAULT_KUN_MODEL } from '../config/kun-config.js'
@@ -40,13 +41,18 @@ import {
 
 export type ThreadServiceOptions = {
   threadStore: ThreadStore
+  /** Raw store used only after the lifecycle fence has been closed and drained. */
+  deleteThreadStore?: ThreadStore
   sessionStore: SessionStore
   events: RuntimeEventRecorder
   ids: IdGenerator
   nowIso: () => string
   defaultApprovalPolicy?: ApprovalPolicy
   defaultSandboxMode?: SandboxMode
-  onDeleted?: (threadId: string) => void
+  lifecycleFence?: ThreadLifecycleFence
+  /** Abort in-process work after the fence starts rejecting new writes. */
+  onDeleting?: (threadId: string) => Promise<void> | void
+  onDeleted?: (threadId: string) => Promise<void> | void
 }
 
 export type ListThreadsOptions = ThreadStoreListOptions
@@ -78,22 +84,28 @@ export type SyncPlanTodosOptions = {
 
 export class ThreadService {
   private readonly threadStore: ThreadStore
+  private readonly deleteThreadStore: ThreadStore
   private readonly sessionStore: SessionStore
   private readonly events: RuntimeEventRecorder
   private readonly ids: IdGenerator
   private readonly nowIso: () => string
   private defaultApprovalPolicy: ApprovalPolicy | undefined
   private defaultSandboxMode: SandboxMode | undefined
-  private readonly onDeleted?: (threadId: string) => void
+  private readonly lifecycleFence?: ThreadLifecycleFence
+  private readonly onDeleting?: (threadId: string) => Promise<void> | void
+  private readonly onDeleted?: (threadId: string) => Promise<void> | void
 
   constructor(options: ThreadServiceOptions) {
     this.threadStore = options.threadStore
+    this.deleteThreadStore = options.deleteThreadStore ?? options.threadStore
     this.sessionStore = options.sessionStore
     this.events = options.events
     this.ids = options.ids
     this.nowIso = options.nowIso
     this.defaultApprovalPolicy = options.defaultApprovalPolicy
     this.defaultSandboxMode = options.defaultSandboxMode
+    this.lifecycleFence = options.lifecycleFence
+    this.onDeleting = options.onDeleting
     this.onDeleted = options.onDeleted
   }
 
@@ -156,7 +168,16 @@ export class ThreadService {
       ...(options.parentThreadId ? { parentThreadId: options.parentThreadId } : {}),
       status: options.status
     })
-    await this.threadStore.upsert(thread)
+    // `create` and destructive delete use the same per-thread mutation queue.
+    // Without this, a same-id create could reopen the fence just before a
+    // concurrent delete performs raw rm(), losing the new lifetime.
+    await this.withThreadMutation(thread.id, async () => {
+      // A user-visible create is the only operation allowed to reactivate an
+      // id after deletion. It deliberately starts a fresh generation so
+      // delayed writes captured by the previous lifetime remain stale.
+      this.lifecycleFence?.reopen(id)
+      await this.threadStore.upsert(thread)
+    })
     await this.events.record({
       kind: 'thread_created',
       threadId: thread.id,
@@ -433,11 +454,42 @@ export class ThreadService {
   }
 
   async delete(threadId: string): Promise<boolean> {
-    const ok = await this.withThreadMutation(threadId, () => this.threadStore.delete(threadId))
-    if (!ok) return false
-    this.sessionStore.clearThreadMemory(threadId)
-    this.onDeleted?.(threadId)
-    return true
+    let rawDeleteCommitted = false
+    try {
+      return await this.withThreadMutation(threadId, async () => {
+        // A concurrent delete that arrives after this service already removed
+        // the thread must not reopen its fence on a raw false result.
+        if (this.lifecycleFence?.isDeleted(threadId)) return false
+
+        this.lifecycleFence?.beginClose(threadId)
+        // Stop only this thread's live work. We intentionally do not settle
+        // the turn record here: any late lifecycle writes are now fenced off
+        // and the canonical record is about to be removed.
+        await this.onDeleting?.(threadId)
+        await this.lifecycleFence?.drain(threadId)
+        // Never route deletion through the fenced facade: it is the terminal
+        // raw operation after all old-generation writes have drained.
+        const ok = await this.deleteThreadStore.delete(threadId)
+        if (!ok) {
+          // A failed/no-op deletion must not leave a still-visible thread
+          // permanently unwritable. Existing leases remain invalid because
+          // this is nevertheless a fresh generation.
+          this.lifecycleFence?.reopen(threadId)
+          return false
+        }
+        rawDeleteCommitted = true
+        this.lifecycleFence?.markDeleted(threadId)
+        this.sessionStore.clearThreadMemory(threadId)
+        await this.onDeleted?.(threadId)
+        return true
+      })
+    } catch (error) {
+      // Once raw deletion succeeds, keep the fence closed even when a
+      // best-effort cleanup callback fails; reopening here would let a later
+      // delayed write recreate the directory that was just removed.
+      if (!rawDeleteCommitted) this.lifecycleFence?.reopen(threadId)
+      throw error
+    }
   }
 
   async fork(threadId: string, options: ForkThreadOptions = {}): Promise<ThreadRecord> {
