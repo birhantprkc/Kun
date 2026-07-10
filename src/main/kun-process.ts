@@ -70,25 +70,12 @@ import {
   isCodexPluginCacheRoot,
   normalizeSkillRootPath
 } from './services/skill-service'
+import {
+  KunProcessController,
+  type KunUnexpectedExitInfo
+} from './runtime/kun-process-controller'
 
-let child: ChildProcess | null = null
-let childPort: number | null = null
-let childLogCapture: KunChildLogCapture | null = null
-let lastResolvedBinary: string | null = null
-let kunStartPromise: Promise<void> | null = null
-let childStderrTail = ''
-/** Children killed on purpose (stop/quit/settings restart) — their exit is not a crash. */
-const intentionalStops = new WeakSet<ChildProcess>()
-/** Children that completed the ready handshake — only their exits count as runtime crashes. */
-const readyChildren = new WeakSet<ChildProcess>()
-
-export type KunUnexpectedExitInfo = {
-  code: number | null
-  signal: NodeJS.Signals | null
-  stderrTail: string
-}
-
-let onUnexpectedKunExit: ((info: KunUnexpectedExitInfo) => void) | null = null
+export type { KunUnexpectedExitInfo } from './runtime/kun-process-controller'
 
 /**
  * Called when a READY kun child exits without the GUI asking for it.
@@ -98,7 +85,7 @@ let onUnexpectedKunExit: ((info: KunUnexpectedExitInfo) => void) | null = null
 export function setKunUnexpectedExitHandler(
   handler: ((info: KunUnexpectedExitInfo) => void) | null
 ): void {
-  onUnexpectedKunExit = handler
+  processController.setUnexpectedExitHandler(handler)
 }
 
 const execFileAsync = promisify(execFile)
@@ -182,6 +169,8 @@ type KunChildLogCapture = {
   logLifecycle: (message: string) => void
   close: () => Promise<void>
 }
+
+const processController = new KunProcessController<KunChildLogCapture>()
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -298,11 +287,11 @@ function expandHomePath(path: string): string {
 }
 
 export function isKunChildRunning(): boolean {
-  return child !== null && child.exitCode === null && child.signalCode === null
+  return processController.isRunning()
 }
 
 function isCurrentKunChildPid(pid: number): boolean {
-  return Boolean(child?.pid === pid && isKunChildRunning())
+  return processController.isCurrentPid(pid)
 }
 
 /**
@@ -317,29 +306,24 @@ function isCurrentKunChildPid(pid: number): boolean {
  * never be the thing that launch is itself waiting on.
  */
 export function waitForKunStartupSettled(): Promise<void> {
-  return kunStartPromise ? kunStartPromise.catch(() => undefined) : Promise.resolve()
+  return processController.waitForStartupSettled()
 }
 
 export function startKunChild(settings: AppSettingsV1): Promise<void> {
-  if (kunStartPromise) return kunStartPromise
-  const runtime = resolveKunRuntimeSettings(settings)
-  if (isKunChildRunning()) return Promise.resolve()
-  if (!runtime.autoStart) return Promise.resolve()
-  let promise: Promise<void>
-  promise = startKunChildOnce(settings, runtime).finally(() => {
-    if (kunStartPromise === promise) kunStartPromise = null
+  return processController.start(async () => {
+    const runtime = resolveKunRuntimeSettings(settings)
+    if (isKunChildRunning() || !runtime.autoStart) return
+    await startKunChildOnce(settings, runtime)
   })
-  kunStartPromise = promise
-  return promise
 }
 
 async function startKunChildOnce(
   settings: AppSettingsV1,
   runtime: KunRuntimeSettingsV1
 ): Promise<void> {
-  if (childLogCapture) {
-    await childLogCapture.close()
-    childLogCapture = null
+  if (processController.logCapture) {
+    await processController.logCapture.close()
+    processController.logCapture = null
   }
   const root = appRoot()
   const resolution = resolveKunExecutable(root, runtime.binaryPath)
@@ -359,7 +343,7 @@ async function startKunChildOnce(
       }
     }
   })
-  lastResolvedBinary = resolution.command === process.execPath
+  processController.lastResolvedBinary = resolution.command === process.execPath
     ? resolution.args.join(' ')
     : resolution.command
   const args = buildKunServeArgs({
@@ -410,42 +394,42 @@ async function startKunChildOnce(
   }
   if (!runAsElectron) childEnv.ELECTRON_RUN_AS_NODE = '1'
   else delete childEnv.ELECTRON_RUN_AS_NODE
-  child = spawn(command, args, {
+  processController.child = spawn(command, args, {
     env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false
   })
-  const startedChild = child
-  childPort = runtime.port
+  const startedChild = processController.child
+  processController.childPort = runtime.port
   const startedLogCapture = createKunChildLogCapture(startedChild.pid)
-  childLogCapture = startedLogCapture
-  childStderrTail = ''
+  processController.logCapture = startedLogCapture
+  processController.stderrTail = ''
   startedLogCapture.logLifecycle(`spawned on port ${runtime.port} using data dir ${dataDir}`)
   startedChild.stdout?.on('data', startedLogCapture.captureStdout)
   startedChild.stderr?.on('data', (chunk: Buffer | string) => {
-    childStderrTail = appendTail(childStderrTail, normalizeCapturedChunk(chunk))
+    processController.stderrTail = appendTail(
+      processController.stderrTail,
+      normalizeCapturedChunk(chunk)
+    )
     startedLogCapture.captureStderr(chunk)
   })
-  child.on('exit', (code, signal) => {
+  startedChild.on('exit', (code, signal) => {
     startedLogCapture.logLifecycle(
       signal
         ? `exited with signal ${signal}`
         : `exited with code ${code ?? 'unknown'}`
     )
     void startedLogCapture.close()
-    if (child === startedChild) {
-      child = null
-      childPort = null
-    }
-    if (readyChildren.has(startedChild) && !intentionalStops.has(startedChild)) {
-      onUnexpectedKunExit?.({
+    processController.clearChild(startedChild)
+    if (processController.shouldReportUnexpectedExit(startedChild)) {
+      processController.reportUnexpectedExit({
         code: code ?? null,
         signal: signal ?? null,
-        stderrTail: childStderrTail
+        stderrTail: processController.stderrTail
       })
     }
   })
-  child.on('error', (error) => {
+  startedChild.on('error', (error) => {
     startedLogCapture.logLifecycle(
       `process error: ${error instanceof Error ? error.message : String(error)}`
     )
@@ -455,12 +439,12 @@ async function startKunChildOnce(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     startedLogCapture.logLifecycle(`startup failed before ready: ${message}`)
-    if (child === startedChild) {
+    if (processController.child === startedChild) {
       await stopKunChildAndWait()
     }
     throw error
   }
-  readyChildren.add(startedChild)
+  processController.markReady(startedChild)
   startedLogCapture.logLifecycle(`ready marker received on port ${runtime.port}`)
 }
 
@@ -1376,18 +1360,18 @@ function objectValue(value: unknown): Record<string, unknown> {
 }
 
 export async function stopKunChildAndWait(): Promise<void> {
-  if (!child) {
-    if (childLogCapture) {
-      const capture = childLogCapture
-      childLogCapture = null
+  if (!processController.child) {
+    if (processController.logCapture) {
+      const capture = processController.logCapture
+      processController.logCapture = null
       await capture.close()
     }
     return
   }
-  const stoppingChild = child
-  intentionalStops.add(stoppingChild)
-  const pid = child.pid
-  const capture = childLogCapture
+  const stoppingChild = processController.child
+  processController.markIntentionalStop(stoppingChild)
+  const pid = stoppingChild.pid
+  const capture = processController.logCapture
   if (stoppingChild.exitCode === null && stoppingChild.signalCode === null) {
     try {
       stoppingChild.kill('SIGTERM')
@@ -1404,12 +1388,9 @@ export async function stopKunChildAndWait(): Promise<void> {
     }
     await waitForChildExit(stoppingChild, KUN_STOP_FORCE_MS)
   }
-  if (child === stoppingChild) {
-    child = null
-    childPort = null
-  }
+  processController.clearChild(stoppingChild)
   if (capture) {
-    childLogCapture = null
+    processController.logCapture = null
     await capture.close()
   }
 }
@@ -1452,7 +1433,7 @@ export async function resolveAvailableKunPort(
     // A temporarily unresponsive managed child still owns its configured
     // endpoint. Moving settings to another port here strands the live child
     // and makes every concurrent request launch/probe a port with no server.
-    if (isKunChildRunning() && childPort === preferredPort) {
+    if (isKunChildRunning() && processController.childPort === preferredPort) {
       return { port: preferredPort, changed: false }
     }
     if (await canBindTcpPort(preferredPort, '127.0.0.1')) {
