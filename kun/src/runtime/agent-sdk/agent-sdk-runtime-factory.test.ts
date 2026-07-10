@@ -7,6 +7,8 @@ import { KunCapabilitiesConfig } from '../../contracts/capabilities.js'
 import type { ThreadRecord } from '../../contracts/threads.js'
 import type { UserInputGate, UserInputRequest, UserInputResolution } from '../../ports/user-input-gate.js'
 import { InstructionRuntime } from '../../instructions/instruction-runtime.js'
+import { CapabilityRegistry } from '../../adapters/tool/capability-registry.js'
+import { LocalToolHost } from '../../adapters/tool/local-tool-host.js'
 
 function fakeGate(pending: Promise<UserInputResolution>): {
   gate: UserInputGate
@@ -174,6 +176,14 @@ describe('createAgentSdkRuntime turn context', () => {
           }
         })
       } as never,
+      toolHost: {
+        id: 'test-host',
+        listTools: async () => [],
+        execute: async (_call: unknown, context: { guiDesignCanvas?: boolean; guiDesignArtifact?: { kind: 'svg'; artifactId: string; relativePath: string } }) => {
+          executedContexts.push(context)
+          return { item: { kind: 'tool_result', output: { ok: true } }, approved: true }
+        }
+      } as never,
       turns: { updateTurnMetadata: async () => undefined } as never,
       sessionStore: {
         loadItems: async () => [{
@@ -269,6 +279,73 @@ describe('createAgentSdkRuntime turn context', () => {
     })
   })
 
+  test('runs bridged Kun tools through the canonical host policy boundary', async () => {
+    const executed: string[] = []
+    const tools = [
+      LocalToolHost.defineTool({
+        name: 'approval_required',
+        description: 'Requires approval',
+        inputSchema: { type: 'object', properties: {} },
+        policy: 'on-request',
+        toolKind: 'command_execution',
+        execute: async () => {
+          executed.push('approval_required')
+          return { output: 'should not execute' }
+        }
+      }),
+      LocalToolHost.defineTool({
+        name: 'disabled_tool',
+        description: 'Disabled',
+        inputSchema: { type: 'object', properties: {} },
+        policy: 'never',
+        execute: async () => {
+          executed.push('disabled_tool')
+          return { output: 'should not execute' }
+        }
+      })
+    ]
+    const registry = CapabilityRegistry.fromLocalTools(tools)
+    const runtime = createAgentSdkRuntime({
+      registry,
+      toolHost: new LocalToolHost({ registry }),
+      turns: {} as never,
+      sessionStore: {} as never,
+      threadStore: {
+        get: async () => threadWith({
+          workspace: '/ws',
+          approvalPolicy: 'on-request',
+          turns: [{ id: 'tn', prompt: 'run tool' } as ThreadRecord['turns'][number]]
+        })
+      } as never,
+      events: {} as never,
+      ids: { next: (prefix) => prefix },
+      prefix: { systemPrompt: '' },
+      providerConfigs: {},
+      agentSdkProviderIds: new Set(),
+      defaultApprovalPolicy: 'on-request'
+    })
+    const deps = (runtime as unknown as {
+      deps: {
+        executeKunTool(
+          threadId: string,
+          turnId: string,
+          toolName: string,
+          args: Record<string, unknown>
+        ): Promise<{ output: unknown; isError?: boolean }>
+      }
+    }).deps
+
+    await expect(deps.executeKunTool('th', 'tn', 'approval_required', {})).resolves.toMatchObject({
+      isError: true,
+      output: expect.objectContaining({ code: 'approval_denied' })
+    })
+    await expect(deps.executeKunTool('th', 'tn', 'disabled_tool', {})).resolves.toMatchObject({
+      isError: true,
+      output: expect.stringContaining('disabled by policy')
+    })
+    expect(executed).toEqual([])
+  })
+
   test('uses the thread approval policy to gate SDK built-in tools', async () => {
     const events: Array<{ kind: string; approvalPolicy?: string }> = []
     const runtime = createAgentSdkRuntime({
@@ -334,6 +411,16 @@ describe('createAgentSdkRuntime turn context', () => {
             }
           }
         })
+      } as never,
+      toolHost: {
+        id: 'test-host',
+        listTools: async () => [],
+        execute: async (_call: unknown, context: { awaitUserInput?: (input: {
+          id: string; itemId: string; prompt: string; questions: []
+        }) => Promise<unknown> }) => {
+          await context.awaitUserInput?.({ id: 'in_sdk', itemId: 'item_sdk', prompt: 'Pick', questions: [] })
+          return { item: { kind: 'tool_result', output: {} }, approved: true }
+        }
       } as never,
       turns: { applyItem: async () => undefined, updateItem: async () => undefined } as never,
       sessionStore: {

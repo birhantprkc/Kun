@@ -24,7 +24,7 @@ export function createBackgroundShellTool(options: BackgroundShellToolOptions = 
   return LocalToolHost.defineTool({
     name: 'background_shell',
     description:
-      'Manage shell sessions started with bash background=true. The bash tool assigns an 8-character session_id when starting a background command; use that id here. action="list" lists running sessions by default (set include_finished=true to also show completed/stopped/failed sessions; optional thread_only). action="read" returns a non-blocking output snapshot. action="poll" waits up to yield_seconds for more output or exit. action="write" sends stdin via input. action="stop" terminates a running session.',
+      'Manage shell sessions started with bash background=true in the current thread. The bash tool assigns an 8-character session_id when starting a background command; use that id here. action="list" lists this thread\'s running sessions by default (set include_finished=true to also show completed/stopped/failed sessions). action="read" returns a non-blocking output snapshot. action="poll" waits up to yield_seconds for more output or exit. action="write" sends stdin via input. action="stop" terminates a running session.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -38,6 +38,9 @@ export function createBackgroundShellTool(options: BackgroundShellToolOptions = 
         },
         yield_seconds: { type: 'number' },
         include_finished: { type: 'boolean', default: false },
+        // Kept only to tolerate old model transcripts. Listing is always
+        // scoped to the invoking thread; false must never expose other
+        // threads' commands, working directories, output, or log paths.
         thread_only: { type: 'boolean', default: true },
         input: { type: 'string' }
       },
@@ -50,11 +53,9 @@ export function createBackgroundShellTool(options: BackgroundShellToolOptions = 
       withToolBoundary(async () => {
         const action = typeof args.action === 'string' ? args.action.trim() : ''
         if (action === 'list') {
-          const threadOnly = args.thread_only !== false
-          const threadId = threadOnly ? context.threadId : undefined
           let sessions = options.listBackgroundSessions
-            ? [...options.listBackgroundSessions(threadId)]
-            : await listBashSessionRecords(threadId)
+            ? [...options.listBackgroundSessions(context.threadId)]
+            : await listBashSessionRecords(context.threadId)
           if (args.include_finished !== true) {
             sessions = sessions.filter((session) => session.status === 'running')
           }

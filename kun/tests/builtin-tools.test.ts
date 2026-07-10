@@ -1007,6 +1007,40 @@ describe('Kun built-in tools', () => {
     expect((listed.sessions as Array<{ session_id?: string }>)?.[0]?.session_id).toBe('abcd1234')
   })
 
+  it('never exposes another thread\'s shell sessions when thread_only is false', async () => {
+    const requestedThreadIds: Array<string | undefined> = []
+    const backgroundHost = new LocalToolHost({
+      tools: [
+        createBackgroundShellTool({
+          listBackgroundSessions: (threadId) => {
+            requestedThreadIds.push(threadId)
+            return [
+              {
+                id: 'owner001', threadId: 'thr_1', turnId: 'turn_1', command: 'safe', cwd: workspace,
+                shell: 'bash', status: 'running', startedAt: '2026-01-01T00:00:00.000Z',
+                exitCode: null, output: 'owner output', detached: true
+              },
+              {
+                id: 'other001', threadId: 'thr_2', turnId: 'turn_2', command: 'secret', cwd: '/other-workspace',
+                shell: 'bash', status: 'running', startedAt: '2026-01-01T00:00:00.000Z',
+                exitCode: null, output: 'other output', detached: true
+              }
+            ].filter((session) => session.threadId === threadId)
+          }
+        })
+      ]
+    })
+
+    const listed = await executeTool(backgroundHost, workspace, 'background_shell', {
+      action: 'list',
+      thread_only: false,
+      include_finished: true
+    })
+
+    expect(requestedThreadIds).toEqual(['thr_1'])
+    expect((listed.sessions as Array<{ session_id?: string }>).map((session) => session.session_id)).toEqual(['owner001'])
+  })
+
   it('persists full background shell output to the thread record directory', async () => {
     const backgroundHost = new LocalToolHost({
       tools: [createBackgroundBashLocalTool(), createBackgroundShellTool()]

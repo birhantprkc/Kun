@@ -12,7 +12,7 @@ import type { TurnService } from '../../services/turn-service.js'
 import type { SessionStore } from '../../ports/session-store.js'
 import type { ThreadStore } from '../../ports/thread-store.js'
 import type { CapabilityRegistry } from '../../adapters/tool/capability-registry.js'
-import type { ToolHostContext } from '../../ports/tool-host.js'
+import type { ToolHost, ToolHostContext } from '../../ports/tool-host.js'
 import {
   DEFAULT_SANDBOX_MODE,
   type ApprovalPolicy,
@@ -49,6 +49,12 @@ import {
 
 export interface AgentSdkRuntimeFactoryDeps {
   registry: CapabilityRegistry
+  /**
+   * The canonical host boundary for bridged Kun tool execution. Serve always
+   * supplies this; an omitted host is denied closed rather than bypassing the
+   * policy, sandbox, approval, hook, and operation-journal layers.
+   */
+  toolHost?: ToolHost
   turns: TurnService
   sessionStore: SessionStore
   threadStore: ThreadStore
@@ -443,6 +449,9 @@ export function createAgentSdkRuntime(deps: AgentSdkRuntimeFactoryDeps): AgentSd
       if (!thread || !turn || signal?.aborted) {
         return { output: 'turn is no longer active; tool execution was cancelled', isError: true }
       }
+      if (!deps.toolHost) {
+        return { output: 'Kun tool host is unavailable; tool execution was denied', isError: true }
+      }
       // Re-resolve plan context so create_plan can write to its reserved path.
       const plan = resolveTurnPlanContext(thread, turnId)
       const approvalPolicy = thread.approvalPolicy ?? deps.defaultApprovalPolicy
@@ -459,9 +468,22 @@ export function createAgentSdkRuntime(deps: AgentSdkRuntimeFactoryDeps): AgentSd
         awaitUserInput: makeAwaitUserInput(threadId, turnId, toolSignal)
       })
       try {
-        const record = deps.registry.resolveTool(toolName, ctx)
-        const result = await record.tool.execute(args, ctx)
-        return { output: result.output, isError: result.isError }
+        // The SDK's MCP handler must cross the same LocalToolHost boundary as
+        // native turns. Calling CapabilityRegistry.tool.execute directly skips
+        // policy/sandbox/approval gates, hooks, read-before-edit validation,
+        // and the operation journal.
+        const result = await deps.toolHost.execute({
+          callId: `sdk_${turnId}_${toolName}`,
+          toolName,
+          arguments: args
+        }, ctx)
+        if (result.item.kind !== 'tool_result') {
+          return {
+            output: `Kun tool ${toolName} returned an invalid result item`,
+            isError: true
+          }
+        }
+        return { output: result.item.output, isError: result.item.isError }
       } catch (err) {
         return { output: err instanceof Error ? err.message : String(err), isError: true }
       }

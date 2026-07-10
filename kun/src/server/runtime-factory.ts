@@ -569,6 +569,7 @@ export async function createKunServeRuntime(
 	  if (agentSdkProviderIds.size > 0 || defaultIsAgentSdk) {
 	    sdkRuntimeDeps = {
 	      registry,
+	      toolHost,
 	      turns: turnService,
 	      sessionStore,
 	      threadStore,
