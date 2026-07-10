@@ -37,7 +37,7 @@ export class FileSessionStore implements SessionStore {
   }
   private readonly itemsCache = new Map<string, TurnItem[]>()
   private readonly itemsCacheVersion = new Map<string, number>()
-  private readonly highestSeqCache = new Map<string, number>()
+  private readonly highestSeqCache = new Map<string, { seq: number; size: number; mtimeMs: number }>()
   private readonly writeQueues = new Map<string, Promise<unknown>>()
 
   constructor(options: {
@@ -68,7 +68,8 @@ export class FileSessionStore implements SessionStore {
       await this.ensureDir(this.threadDir(threadId))
       const path = this.eventsPath(threadId)
       await appendFile(path, `${JSON.stringify(event)}\n`, { encoding: 'utf-8', mode: 0o600 })
-      this.cacheHighestSeq(threadId, event.seq)
+      const info = await stat(path)
+      this.cacheHighestSeq(threadId, event.seq, info, { preserveHigher: true })
       if (event.kind === 'usage') {
         await this.compactUsageEventsIfLarge(threadId).catch((error) => {
           warnUsageCompaction(threadId, error)
@@ -185,14 +186,20 @@ export class FileSessionStore implements SessionStore {
 
   async highestSeq(threadId: string): Promise<number> {
     if (!isSafeThreadId(threadId)) return 0
-    const cached = this.highestSeqCache.get(threadId)
-    if (cached !== undefined) {
-      this.cacheHighestSeq(threadId, cached)
-      return cached
+    const path = this.eventsPath(threadId)
+    const info = await stat(path).catch(() => null)
+    if (!info) {
+      this.highestSeqCache.delete(threadId)
+      return 0
     }
-    const events = await readJsonl<RuntimeEvent>(this.eventsPath(threadId))
+    const cached = this.highestSeqCache.get(threadId)
+    if (cached && cached.size === info.size && cached.mtimeMs === info.mtimeMs) {
+      this.cacheHighestSeq(threadId, cached.seq, info)
+      return cached.seq
+    }
+    const events = await readJsonl<RuntimeEvent>(path)
     const highest = events.reduce((max, event) => Math.max(max, event.seq), 0)
-    this.cacheHighestSeq(threadId, highest)
+    this.cacheHighestSeq(threadId, highest, await stat(path).catch(() => info))
     return highest
   }
 
@@ -226,10 +233,19 @@ export class FileSessionStore implements SessionStore {
     }
   }
 
-  private cacheHighestSeq(threadId: string, seq: number): void {
-    const current = this.highestSeqCache.get(threadId) ?? 0
+  private cacheHighestSeq(
+    threadId: string,
+    seq: number,
+    info: { size: number; mtimeMs: number },
+    options: { preserveHigher?: boolean } = {}
+  ): void {
+    const current = this.highestSeqCache.get(threadId)?.seq ?? 0
     this.highestSeqCache.delete(threadId)
-    this.highestSeqCache.set(threadId, Math.max(current, seq))
+    this.highestSeqCache.set(threadId, {
+      seq: options.preserveHigher ? Math.max(current, seq) : seq,
+      size: info.size,
+      mtimeMs: info.mtimeMs
+    })
     while (this.highestSeqCache.size > HIGHEST_SEQ_CACHE_MAX_THREADS) {
       const oldest = this.highestSeqCache.keys().next().value
       if (oldest === undefined) return
