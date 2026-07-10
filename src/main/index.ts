@@ -76,7 +76,7 @@ import {
   type KunUnexpectedExitInfo
 } from './kun-process'
 import { expandHomePath } from './settings-store'
-import { RestartBudget, type KunRuntimeStatus } from './kun-runtime-supervisor'
+import { KunRuntimeSupervisor, type KunRuntimeStatus } from './kun-runtime-supervisor'
 import { configureLogger, logError, logWarn, pruneOnStartup } from './logger'
 import { cleanupUnusedGitCheckpointsIfDue } from './services/git-checkpoint-service'
 import { resolveMainWindowCloseDecision } from './window-close-behavior'
@@ -118,6 +118,7 @@ import {
   buildManagedRuntimeHotApplyBody,
   classifyManagedRuntimeHotApplyResponse
 } from './runtime/kun-runtime-config-service'
+import { ManagedRuntimeOperationCoordinator } from './runtime/managed-runtime-operation-coordinator'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 // 品牌升级为 Kun 后仍保留旧 AppUserModelId:它必须和 electron-builder
@@ -791,14 +792,8 @@ async function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
-let runtimeEnsurePromise: Promise<AppSettingsV1> | null = null
-let runtimeEnsureFingerprint: string | null = null
-let runtimeRestartPromise: Promise<void> | null = null
-let runtimeSettingsApplyPromise: Promise<void> | null = null
-let lastAppliedSettings: AppSettingsV1 | null = null
+const runtimeOperations = new ManagedRuntimeOperationCoordinator<AppSettingsV1>()
 
-const RUNTIME_WATCHDOG_INTERVAL_MS = 30_000
-const RUNTIME_WATCHDOG_FAILURE_THRESHOLD = 3
 /**
  * How long a managed child that failed the initial health probe gets to prove
  * it is merely busy (e.g. a long synchronous step) rather than hung, before the
@@ -806,188 +801,62 @@ const RUNTIME_WATCHDOG_FAILURE_THRESHOLD = 3
  * slow-but-alive runtime would cost the user their in-flight turn (#621).
  */
 const RUNTIME_HUNG_CONFIRM_MS = 10_000
-const runtimeRestartBudget = new RestartBudget({ windowMs: 60_000, maxRestarts: 3 })
-let lastRuntimeStatus: KunRuntimeStatus | null = null
-let supervisedRestartInFlight = false
-let runtimeWatchdogTimer: NodeJS.Timeout | null = null
-let runtimeWatchdogFailures = 0
-let runtimeWatchdogTickInFlight = false
+const runtimeSupervisor = new KunRuntimeSupervisor<AppSettingsV1>({
+  deps: {
+    loadSettings: () => store.load(),
+    canAutoRestart: (settings) => Boolean(
+      resolveConfiguredApiKey(settings) && getKunRuntimeSettings(settings).autoStart
+    ),
+    ensureRuntime: (settings) => ensureRuntime(settings),
+    restartRuntime: (settings) => restartRuntime(settings),
+    checkHealth: (settings, timeoutMs) => waitForKunHealth(settings, timeoutMs),
+    isChildRunning: () => kunRuntimeAdapter.isChildRunning(),
+    isOperationPending: () => runtimeOperations.hasPendingOperation(),
+    isStopped: () => managedRuntimesStoppedForQuit || isAppQuitInProgress(),
+    publish: (full) => {
+      logWarn('runtime-status', `${full.state} (${full.source})${full.message ? `: ${full.message}` : ''}`)
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send('runtime:status', full)
+      }
+    },
+    warn: (source, message, details) => logWarn(source, message, details),
+    error: (source, message, details) => logError(source, message, details)
+  }
+})
 
 function publishRuntimeStatus(status: Omit<KunRuntimeStatus, 'at'>): void {
-  const full: KunRuntimeStatus = { ...status, at: new Date().toISOString() }
-  lastRuntimeStatus = full
-  logWarn('runtime-status', `${full.state} (${full.source})${full.message ? `: ${full.message}` : ''}`)
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) win.webContents.send('runtime:status', full)
-  }
+  runtimeSupervisor.publish(status)
 }
 
 /** Record a healthy runtime: reset the crash budget and watchdog, announce recovery. */
 function noteRuntimeHealthy(source: string): void {
-  runtimeRestartBudget.reset()
-  runtimeWatchdogFailures = 0
-  startRuntimeWatchdog()
-  if (lastRuntimeStatus && lastRuntimeStatus.state !== 'running') {
-    publishRuntimeStatus({ state: 'running', source })
-  }
+  runtimeSupervisor.noteHealthy(source)
 }
 
 function handleUnexpectedKunExit(info: KunUnexpectedExitInfo): void {
-  void superviseKunCrash(info).catch((error: unknown) => {
-    logError('kun-supervisor', 'supervised restart crashed', {
-      message: error instanceof Error ? error.message : String(error)
-    })
-  })
-}
-
-async function superviseKunCrash(info: KunUnexpectedExitInfo): Promise<void> {
-  if (managedRuntimesStoppedForQuit || isAppQuitInProgress()) return
-  const exitLabel = info.signal ? `signal ${info.signal}` : `code ${info.code ?? 'unknown'}`
-  publishRuntimeStatus({
-    state: 'crashed',
-    source: 'supervisor',
-    message: `Kun exited unexpectedly (${exitLabel}).`,
-    stderrTail: info.stderrTail
-  })
-  if (supervisedRestartInFlight) return
-  supervisedRestartInFlight = true
-  try {
-    const settings = await store.load()
-    const runtime = getKunRuntimeSettings(settings)
-    if (!resolveConfiguredApiKey(settings) || !runtime.autoStart) {
-      publishRuntimeStatus({
-        state: 'stopped',
-        source: 'supervisor',
-        message: 'Kun exited and automatic restart is unavailable (missing API key or auto-start disabled).'
-      })
-      return
-    }
-    let lastError = ''
-    for (;;) {
-      if (managedRuntimesStoppedForQuit || isAppQuitInProgress()) return
-      const verdict = runtimeRestartBudget.note()
-      if (!verdict.allowed) {
-        publishRuntimeStatus({
-          state: 'failed',
-          source: 'supervisor',
-          message: lastError
-            ? `Kun keeps crashing; automatic restarts are paused. Last error: ${lastError}`
-            : 'Kun keeps crashing; automatic restarts are paused. Check the runtime logs, then retry.',
-          stderrTail: info.stderrTail
-        })
-        return
-      }
-      publishRuntimeStatus({
-        state: 'restarting',
-        source: 'supervisor',
-        attempt: verdict.attempt,
-        maxAttempts: 3,
-        message: `Restarting Kun automatically (attempt ${verdict.attempt}/3).`
-      })
-      await new Promise((resolve) => setTimeout(resolve, verdict.delayMs))
-      try {
-        await ensureRuntime(await store.load())
-        noteRuntimeHealthy('supervisor')
-        return
-      } catch (error) {
-        lastError = error instanceof Error ? error.message : String(error)
-        logWarn('kun-supervisor', `automatic restart attempt ${verdict.attempt} failed: ${lastError}`)
-      }
-    }
-  } finally {
-    supervisedRestartInFlight = false
-  }
+  runtimeSupervisor.handleUnexpectedExit(info)
 }
 
 function startRuntimeWatchdog(): void {
-  if (runtimeWatchdogTimer) return
-  const timer = setInterval(() => {
-    void runtimeWatchdogTick().catch((error: unknown) => {
-      logWarn('kun-watchdog', 'watchdog tick failed', {
-        message: error instanceof Error ? error.message : String(error)
-      })
-    })
-  }, RUNTIME_WATCHDOG_INTERVAL_MS)
-  timer.unref()
-  runtimeWatchdogTimer = timer
+  runtimeSupervisor.startWatchdog()
 }
 
 function stopRuntimeWatchdog(): void {
-  if (runtimeWatchdogTimer) {
-    clearInterval(runtimeWatchdogTimer)
-    runtimeWatchdogTimer = null
-  }
-}
-
-/**
- * Post-startup liveness check for the GUI-managed kun child: the boot
- * probe only covers launch, so a runtime that hangs later (blocked
- * event loop, sqlite lock) would otherwise stay dead until the user
- * restarts the app.
- */
-async function runtimeWatchdogTick(): Promise<void> {
-  if (runtimeWatchdogTickInFlight) return
-  if (managedRuntimesStoppedForQuit || isAppQuitInProgress()) return
-  if (
-    supervisedRestartInFlight ||
-    runtimeRestartPromise ||
-    runtimeSettingsApplyPromise ||
-    runtimeEnsurePromise
-  ) {
-    return
-  }
-  if (!kunRuntimeAdapter.isChildRunning()) return
-  runtimeWatchdogTickInFlight = true
-  try {
-    const settings = await store.load()
-    const healthy = await waitForKunHealth(settings, 5_000)
-    if (healthy) {
-      runtimeWatchdogFailures = 0
-      return
-    }
-    runtimeWatchdogFailures += 1
-    logWarn(
-      'kun-watchdog',
-      `health probe failed (${runtimeWatchdogFailures}/${RUNTIME_WATCHDOG_FAILURE_THRESHOLD})`
-    )
-    if (runtimeWatchdogFailures < RUNTIME_WATCHDOG_FAILURE_THRESHOLD) return
-    runtimeWatchdogFailures = 0
-    publishRuntimeStatus({
-      state: 'restarting',
-      source: 'watchdog',
-      message: 'Kun stopped responding to health checks; restarting it.'
-    })
-    try {
-      await restartRuntime(settings)
-      noteRuntimeHealthy('watchdog')
-    } catch (error) {
-      publishRuntimeStatus({
-        state: 'failed',
-        source: 'watchdog',
-        message: `Kun is unresponsive and the automatic restart failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      })
-    }
-  } finally {
-    runtimeWatchdogTickInFlight = false
-  }
+  runtimeSupervisor.stopWatchdog()
 }
 
 function queueRuntimeSettingsApply(prev: AppSettingsV1, next: AppSettingsV1): void {
   // Always update the prev/next anchor so a later task diffs against
   // the settings that were actually applied last, not against the
   // original `prev` captured when this call was queued.
-  const anchor = lastAppliedSettings ?? prev
-  lastAppliedSettings = next
+  const anchor = runtimeOperations.latestOr(prev)
+  runtimeOperations.noteLatest(next)
   const applyMode = runtimeSettingsApplyMode(anchor, next)
   if (applyMode === 'none') return
 
-  const previousTask = runtimeSettingsApplyPromise ?? Promise.resolve()
-  const task = previousTask
-    .catch(() => undefined)
-    .then(async () => {
-      const current = lastAppliedSettings ?? next
+  runtimeOperations.enqueueSettingsApply(
+    async () => {
+      const current = runtimeOperations.latestOr(next)
       const currentMode = runtimeSettingsApplyMode(anchor, current)
       if (currentMode === 'restart') {
         await restartManagedRuntimeForSettingsChange(anchor, current)
@@ -997,51 +866,35 @@ function queueRuntimeSettingsApply(prev: AppSettingsV1, next: AppSettingsV1): vo
           await restartManagedRuntimeForSettingsChange(anchor, current, true)
         }
       }
-    })
-    .catch((error: unknown) => {
+    },
+    (error: unknown) => {
       logWarn('settings-apply', 'Failed to apply Kun runtime settings in background', {
         message: error instanceof Error ? error.message : String(error)
       })
-    })
-    .finally(() => {
-      if (runtimeSettingsApplyPromise === task) {
-        runtimeSettingsApplyPromise = null
-      }
-    })
-
-  runtimeSettingsApplyPromise = task
+    }
+  )
 }
 
 function queueRuntimeMcpConfigApply(settings: AppSettingsV1): void {
-  lastAppliedSettings = settings
-
-  const previousTask = runtimeSettingsApplyPromise ?? Promise.resolve()
-  const task = previousTask
-    .catch(() => undefined)
-    .then(async () => {
-      const current = lastAppliedSettings ?? settings
+  runtimeOperations.noteLatest(settings)
+  runtimeOperations.enqueueSettingsApply(
+    async () => {
+      const current = runtimeOperations.latestOr(settings)
       const result = await applyManagedRuntimeSettingsHot(current, 'mcp-config')
       if (result === 'restart_required') {
         await restartManagedRuntimeForMcpConfigChange(current)
       }
-    })
-    .catch((error: unknown) => {
+    },
+    (error: unknown) => {
       logWarn('mcp-config', 'Failed to apply Kun MCP config change in background', {
         message: error instanceof Error ? error.message : String(error)
       })
-    })
-    .finally(() => {
-      if (runtimeSettingsApplyPromise === task) {
-        runtimeSettingsApplyPromise = null
-      }
-    })
-
-  runtimeSettingsApplyPromise = task
+    }
+  )
 }
 
 async function waitForQueuedRuntimeSettingsApply(): Promise<void> {
-  if (!runtimeSettingsApplyPromise) return
-  await runtimeSettingsApplyPromise
+  await runtimeOperations.waitForSettingsApply()
 }
 
 /**
@@ -1056,43 +909,15 @@ function runtimeFingerprint(settings: AppSettingsV1): string {
 }
 
 async function ensureRuntime(settings: AppSettingsV1): Promise<AppSettingsV1> {
-  const restart = runtimeRestartPromise
-  if (restart) {
-    try {
-      await restart
+  try {
+    if (await runtimeOperations.waitForRestart()) {
       return store.load()
-    } catch {
-      /* fall through to a normal ensure so callers see the latest state */
     }
+  } catch {
+    /* fall through to a normal ensure so callers see the latest state */
   }
   const fingerprint = runtimeFingerprint(settings)
-  const pending = runtimeEnsurePromise
-  const pendingFingerprint = runtimeEnsureFingerprint
-  if (pending) {
-    // Wait for the in-flight ensure, then re-evaluate against the
-    // fingerprint so callers don't inherit a stale result.
-    try {
-      const ensuredSettings = await pending
-      if (pendingFingerprint === fingerprint) return ensuredSettings
-    } catch {
-      /* fall through to retry with the current settings */
-    }
-  }
-  const task = ensureRuntimeOnce(settings)
-  let trackedTask: Promise<AppSettingsV1>
-  trackedTask = task.finally(() => {
-    if (runtimeEnsurePromise === trackedTask) {
-      runtimeEnsurePromise = null
-      runtimeEnsureFingerprint = null
-    }
-  })
-  runtimeEnsurePromise = trackedTask
-  runtimeEnsureFingerprint = fingerprint
-  try {
-    return await trackedTask
-  } finally {
-    /* cleanup runs via the .finally above */
-  }
+  return runtimeOperations.ensure(fingerprint, () => ensureRuntimeOnce(settings))
 }
 
 async function ensureRuntimeOnce(settings: AppSettingsV1): Promise<AppSettingsV1> {
@@ -1111,7 +936,7 @@ async function resolveManagedKunLaunchSettings(
   if (!resolved.changed) return launchSettings
 
   const next = await store.patch({ agents: { kun: { port: resolved.port } } })
-  lastAppliedSettings = next
+  runtimeOperations.noteLatest(next)
   logWarn(source, `Kun port ${runtime.port} is unavailable; using ${resolved.port} for the managed runtime`, {
     previousPort: runtime.port,
     port: resolved.port,
@@ -1136,7 +961,7 @@ async function ensureManagedKunRuntimeToken(
   const next = await store.patch({
     agents: { kun: { runtimeToken: generateKunRuntimeToken() } }
   })
-  lastAppliedSettings = next
+  runtimeOperations.noteLatest(next)
   logWarn(source, 'Generated a runtime token for the managed Kun runtime because none was configured.')
   return { settings: next, generated: true }
 }
@@ -1232,17 +1057,7 @@ async function ensureKunRuntime(settings: AppSettingsV1): Promise<AppSettingsV1>
 }
 
 async function restartRuntime(settings: AppSettingsV1): Promise<void> {
-  if (runtimeRestartPromise) return runtimeRestartPromise
-  const task = restartRuntimeOnce(settings)
-    .finally(() => {
-      if (runtimeRestartPromise === task) {
-        runtimeRestartPromise = null
-      }
-    })
-  runtimeRestartPromise = task
-  runtimeEnsurePromise = null
-  runtimeEnsureFingerprint = null
-  return task
+  return runtimeOperations.restart(() => restartRuntimeOnce(settings))
 }
 
 async function restartRuntimeOnce(settings: AppSettingsV1): Promise<void> {
@@ -1355,8 +1170,8 @@ function createWindow(options: { suppressInitialShow?: boolean } = {}): void {
   })
   mainWindow.webContents.once('did-finish-load', () => {
     traceStartup('window:did-finish-load')
-    if (lastRuntimeStatus && mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('runtime:status', lastRuntimeStatus)
+    if (runtimeSupervisor.lastStatus && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('runtime:status', runtimeSupervisor.lastStatus)
     }
     showWindow()
   })
@@ -1560,7 +1375,7 @@ async function rollbackRuntimeSettingsAfterFailedApply(
       agents: { kun: getKunRuntimeSettings(prev) },
       provider: prev.provider
     })
-    lastAppliedSettings = base
+    runtimeOperations.noteLatest(base)
   } catch (error) {
     logWarn('settings-apply', 'failed to restore previous runtime settings on disk', {
       message: error instanceof Error ? error.message : String(error)

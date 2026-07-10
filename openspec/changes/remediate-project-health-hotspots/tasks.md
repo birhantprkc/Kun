@@ -15,7 +15,7 @@
   exit policy behind a runtime health monitor.
 - [ ] 2.3 Extract generated-config and hot-apply/restart decision logic behind a
   runtime configuration service.
-- [ ] 2.4 Introduce a main-process runtime supervisor for ensure, restart, watchdog,
+- [x] 2.4 Introduce a main-process runtime supervisor for ensure, restart, watchdog,
   and settings-apply serialization.
 - [ ] 2.5 Extract application shutdown coordination and prove no runtime can restart
   after quit begins.
