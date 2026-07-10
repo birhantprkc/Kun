@@ -91,11 +91,7 @@ import {
   MAX_FORWARDED_GENERATED_IMAGES
 } from './tool-result-image.js'
 import { estimateModelRequestInputTokens, estimateRequestOverheadTokens } from './model-request-estimator.js'
-import {
-  recentAutoRouterContext,
-  resolveAutoModelRoute,
-  type AutoModelRouteSelection
-} from './auto-model-router.js'
+import { ModelRoutingService } from './model-routing-service.js'
 import { ToolStormBreaker, type ToolStormBreakerOptions } from './tool-storm-breaker.js'
 import { healLoadedHistoryItems } from './history-healing.js'
 import { LoopTelemetry } from './loop-telemetry.js'
@@ -355,7 +351,7 @@ export type AgentLoopOptions = {
  */
 export class AgentLoop {
   private readonly opts: AgentLoopOptions
-  private readonly autoModelRoutes = new Map<string, AutoModelRouteSelection>()
+  private readonly modelRouting: ModelRoutingService
   private readonly toolStormBreakers = new Map<string, ToolStormBreaker>()
   private readonly telemetry: LoopTelemetry
   private readonly modelRoundEngine: ModelRoundEngine
@@ -386,6 +382,7 @@ export class AgentLoop {
     this.opts = opts
     this.telemetry = new LoopTelemetry(opts.sessionStore)
     this.turnAttachments = new TurnAttachmentService(opts.attachmentStore)
+    this.modelRouting = new ModelRoutingService(opts.model)
     this.modelRoundEngine = new ModelRoundEngine({
       model: opts.model,
       events: opts.events,
@@ -658,7 +655,7 @@ export class AgentLoop {
         // marker it reads.
         await this.evaluateGoalResume(threadId, turnId, finalStatus ?? 'failed').catch(() => undefined)
       } finally {
-        this.autoModelRoutes.delete(autoModelRouteKey(threadId, turnId))
+        this.modelRouting.clear(threadId, turnId)
         this.toolStormBreakers.delete(turnId)
         this.lastNoToolTextByTurn.delete(turnId)
         this.goalNoToolRecoveryStepsByTurn.delete(turnId)
@@ -1119,7 +1116,7 @@ export class AgentLoop {
       effectiveHistoryAfterLatestCompaction(historyItems)
     )
     const providerId = turn?.providerId?.trim() || thread?.providerId?.trim()
-    const modelRoute = await this.resolveTurnModel({
+    const modelRoute = await this.modelRouting.resolve({
       threadId,
       turnId,
       latestRequest: turn?.prompt ?? '',
@@ -2151,49 +2148,6 @@ export class AgentLoop {
     await this.opts.events.record({ kind: 'goal_updated', threadId, goal })
   }
 
-  private async resolveTurnModel(input: {
-    threadId: string
-    turnId: string
-    latestRequest: string
-    items: readonly TurnItem[]
-    signal: AbortSignal
-    providerId?: string
-    reasoningEffort?: string
-    candidates: Array<string | undefined>
-  }): Promise<{ model: string; reasoningEffort?: string }> {
-    const requestedReasoningEffort = normalizeRequestedReasoningEffort(input.reasoningEffort)
-    const resolved = resolveModelMode(...input.candidates)
-    if (resolved.kind === 'fixed') {
-      return {
-        model: resolved.model,
-        ...(requestedReasoningEffort ? { reasoningEffort: requestedReasoningEffort } : {})
-      }
-    }
-    const key = autoModelRouteKey(input.threadId, input.turnId)
-    const cached = this.autoModelRoutes.get(key)
-    if (cached) {
-      return {
-        model: cached.model,
-        reasoningEffort: requestedReasoningEffort ?? cached.reasoningEffort
-      }
-    }
-    const route = await resolveAutoModelRoute({
-      modelClient: this.opts.model,
-      threadId: input.threadId,
-      turnId: input.turnId,
-      ...(input.providerId ? { providerId: input.providerId } : {}),
-      latestRequest: input.latestRequest,
-      recentContext: recentAutoRouterContext(input.items, input.turnId),
-      selectedModelMode: 'auto',
-      abortSignal: input.signal
-    })
-    this.autoModelRoutes.set(key, route)
-    return {
-      model: route.model,
-      reasoningEffort: requestedReasoningEffort ?? route.reasoningEffort
-    }
-  }
-
   /** Convenience factory for tests: builds a loop with sensible defaults. */
   static defaultPrefix(): ImmutablePrefix {
     return createImmutablePrefix({
@@ -2218,26 +2172,6 @@ function buildToolCatalogDriftMessage(toolCatalog: {
     policy,
     sample ? `Current tools: ${sample}${suffix}.` : ''
   ].filter(Boolean).join(' ')
-}
-
-function resolveModelMode(...candidates: Array<string | undefined>): { kind: 'fixed'; model: string } | { kind: 'auto' } {
-  for (const candidate of candidates) {
-    const trimmed = candidate?.trim() ?? ''
-    if (!trimmed) continue
-    return trimmed.toLowerCase() === 'auto'
-      ? { kind: 'auto' }
-      : { kind: 'fixed', model: trimmed }
-  }
-  return { kind: 'fixed', model: '' }
-}
-
-function normalizeRequestedReasoningEffort(effort: string | undefined): string | undefined {
-  const normalized = effort?.trim().toLowerCase()
-  return normalized && normalized !== 'auto' ? normalized : undefined
-}
-
-function autoModelRouteKey(threadId: string, turnId: string): string {
-  return `${threadId}:${turnId}`
 }
 
 function activeTurnRunKey(threadId: string, turnId: string): string {
