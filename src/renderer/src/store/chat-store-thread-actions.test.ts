@@ -232,6 +232,40 @@ describe('chat-store-thread-actions queued messages', () => {
     )
   })
 
+  it('forwards the selected reasoning effort with the next turn', async () => {
+    const provider = {
+      connect: vi.fn(async () => undefined),
+      sendUserMessage: vi.fn(async () => ({
+        threadId: 'thr_existing',
+        turnId: 'turn_1',
+        userMessageItemId: 'user_1'
+      })),
+      subscribeThreadEvents: vi.fn(async () => undefined)
+    }
+    registryMock.getProvider.mockReturnValue(provider)
+    vi.stubGlobal('window', {
+      kunGui: {
+        getSettings: vi.fn(async () => ({
+          agents: { kun: { providerId: 'deepseek', model: 'deepseek-v4-pro' } },
+          codePromptPrefix: ''
+        })),
+        logError: vi.fn(async () => undefined)
+      }
+    })
+    const { actions, state } = buildHarness()
+    state.busy = false
+
+    await expect(actions.sendMessage('think carefully', 'agent', {
+      reasoningEffort: 'high'
+    })).resolves.toBe(true)
+
+    expect(provider.sendUserMessage).toHaveBeenCalledWith(
+      'thr_existing',
+      'think carefully',
+      expect.objectContaining({ reasoningEffort: 'high' })
+    )
+  })
+
   it('sends an override provider from the write route without switching the global runtime provider', async () => {
     const provider = {
       connect: vi.fn(async () => undefined),

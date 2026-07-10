@@ -297,6 +297,7 @@ type Props = {
   onConfigureProviders?: () => void
   hideModelPicker?: boolean
   modelPickerMode?: 'select' | 'combobox'
+  modelControlVariant?: 'combined' | 'split'
   queuedMessages: QueuedComposerMessage[]
   onRemoveQueuedMessage: (id: string) => void
   attachments?: AttachmentReference[]
@@ -459,6 +460,7 @@ export function FloatingComposer({
   onConfigureProviders,
   hideModelPicker = false,
   modelPickerMode = 'select',
+  modelControlVariant = 'combined',
   queuedMessages,
   onRemoveQueuedMessage,
   attachments = EMPTY_ATTACHMENTS,
@@ -2569,6 +2571,7 @@ export function FloatingComposer({
                       composerReasoningEffort={composerReasoningEffort}
                       lockVisionToTextModelSwitch={lockVisionToTextModelSwitch}
                       canChangeModel={canChangeModel}
+                      controlVariant={modelControlVariant}
                       stretch={stretchModelPicker || showToolbarStartControls}
                       onComposerModelChange={onComposerModelChange}
                       onComposerReasoningEffortChange={onComposerReasoningEffortChange}

@@ -1714,6 +1714,8 @@
   "composerReasoningMedium": "Med",
   "composerReasoningHigh": "High",
   "composerReasoningMax": "Ultra",
+  "composerReasoningFaster": "Faster",
+  "composerReasoningSmarter": "Smarter",
   "slashCommandMenuTitle": "Commands",
   "slashCommandApply": "Apply command",
   "slashCommandCurrent": "Current",

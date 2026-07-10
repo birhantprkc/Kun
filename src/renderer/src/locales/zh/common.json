@@ -1714,6 +1714,8 @@
   "composerReasoningMedium": "中",
   "composerReasoningHigh": "高",
   "composerReasoningMax": "超高",
+  "composerReasoningFaster": "更快",
+  "composerReasoningSmarter": "更智能",
   "slashCommandMenuTitle": "命令",
   "slashCommandApply": "应用命令",
   "slashCommandCurrent": "当前",
