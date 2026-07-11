@@ -71,12 +71,21 @@ export class HybridThreadStore implements ThreadStore {
   }
 
   close(): void {
+    this.backfill?.stop()
     try {
       this.db?.close()
     } finally {
       this.db = null
       this.index = null
+      this.statementCache.clear()
     }
+  }
+
+  async shutdown(): Promise<void> {
+    await this.ready()
+    this.backfill?.stop()
+    await this.backfill?.wait()
+    this.close()
   }
 
   async waitForBackfill(): Promise<void> {

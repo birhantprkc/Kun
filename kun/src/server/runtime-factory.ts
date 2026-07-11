@@ -1254,7 +1254,7 @@ async function createPersistentStores(input: {
       index: threadStore
     }),
     shutdown: async () => {
-      threadStore.close()
+      await threadStore.shutdown()
     }
   }
 }
