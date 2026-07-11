@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { LocalToolHost, type LocalTool } from './local-tool-host.js'
+import { validateStructuredArgumentBudget } from './structured-argument-budget.js'
 
 export const DESIGN_CANVAS_TOOL_NAME = 'design_canvas'
 export const DESIGN_CREATE_SCREEN_TOOL_NAME = 'design_create_screen'
@@ -36,6 +37,11 @@ type DesignScreenSpec = {
 
 const SHOULD_ADVERTISE_DESIGN_TOOL = (context: { guiDesignCanvas?: boolean }) =>
   context.guiDesignCanvas === true
+
+export const DESIGN_UPDATE_SHAPES_MAX_OPS = 100
+const DESIGN_UPDATE_SHAPES_MAX_ARGUMENT_BYTES = 512 * 1024
+const DESIGN_UPDATE_SHAPES_MAX_NODES = 2_000
+const DESIGN_UPDATE_SHAPES_MAX_DEPTH = 32
 
 const finiteNumber = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) ? value : undefined
@@ -167,10 +173,10 @@ export function createDesignCanvasTool(): LocalTool {
         },
         ops: {
           description:
-            'For update_shapes: a ShapeOp object or array of ShapeOps. ShapeOps are validated and applied by the renderer.',
+            'For update_shapes: a ShapeOp object or array of at most 100 ShapeOps. Prefer batches of 20-50 related operations and continue larger work in subsequent calls. ShapeOps are validated and applied by the renderer.',
           anyOf: [
             { type: 'object', additionalProperties: true },
-            { type: 'array', items: { type: 'object', additionalProperties: true } }
+            { type: 'array', maxItems: DESIGN_UPDATE_SHAPES_MAX_OPS, items: { type: 'object', additionalProperties: true } }
           ]
         }
       },
@@ -187,6 +193,10 @@ export function createDesignCanvasTool(): LocalTool {
           },
           isError: true
         }
+      }
+      if (normalized.action === 'update_shapes') {
+        const budgetError = designShapeMutationBudgetError(args, normalized.ops)
+        if (budgetError) return designToolError(budgetError)
       }
       return {
         output: {
@@ -270,7 +280,8 @@ export function createDesignUpdateShapesTool(): LocalTool {
     name: DESIGN_UPDATE_SHAPES_TOOL_NAME,
     description: [
       'Apply validated shape operations to the active design canvas: add, update, delete, move, resize, style, token, component, and image changes.',
-      'Use this for whiteboard/vector edits. Use design_create_screen for new screen frames and design_system for the project design-system file. For any add/move/resize coordinates, inspect the current canvas snapshot first and preserve existing object bounds unless the user asked to replace them.'
+      'Use this for whiteboard/vector edits. Prefer batches of 20-50 related operations and continue larger work in subsequent calls; one call accepts at most 100 operations.',
+      'Use design_create_screen for new screen frames and design_system for the project design-system file. For any add/move/resize coordinates, inspect the current canvas snapshot first and preserve existing object bounds unless the user asked to replace them.'
     ].join(' '),
     toolKind: 'tool_call',
     policy: 'auto',
@@ -283,7 +294,11 @@ export function createDesignUpdateShapesTool(): LocalTool {
             'Preferred: a ShapeOp object or array of ShapeOps. The renderer validates and applies each op atomically. If omitted, a direct top-level ShapeOp is also accepted.',
           anyOf: [
             { type: 'object', additionalProperties: true },
-            { type: 'array', items: { type: 'object', additionalProperties: true } }
+            {
+              type: 'array',
+              maxItems: DESIGN_UPDATE_SHAPES_MAX_OPS,
+              items: { type: 'object', additionalProperties: true }
+            }
           ]
         },
         op: {
@@ -296,6 +311,8 @@ export function createDesignUpdateShapesTool(): LocalTool {
     execute: async (args) => {
       const ops = normalizeDesignUpdateShapeOps(args)
       if (!ops) return designToolError('design_update_shapes requires ops as an object or array')
+      const budgetError = designShapeMutationBudgetError(args, ops)
+      if (budgetError) return designToolError(budgetError)
       return designToolOutput(DESIGN_UPDATE_SHAPES_TOOL_NAME, 'update_shapes', ops)
     }
   })
@@ -612,6 +629,19 @@ function normalizeDesignUpdateShapeOps(args: Record<string, unknown>): unknown[]
   if (typeof args.op === 'string' && args.op.trim()) return [args]
   const update = normalizeLooseUpdateShapeOp(args)
   return update ? [update] : null
+}
+
+function designShapeMutationBudgetError(args: Record<string, unknown>, ops: unknown[]): string | null {
+  if (ops.length > DESIGN_UPDATE_SHAPES_MAX_OPS) {
+    return `design_update_shapes accepts at most ${DESIGN_UPDATE_SHAPES_MAX_OPS} operations; split the work into batches of 20-50`
+  }
+  const budget = validateStructuredArgumentBudget(args, {
+    label: 'design_update_shapes',
+    maxBytes: DESIGN_UPDATE_SHAPES_MAX_ARGUMENT_BYTES,
+    maxNodes: DESIGN_UPDATE_SHAPES_MAX_NODES,
+    maxDepth: DESIGN_UPDATE_SHAPES_MAX_DEPTH
+  })
+  return budget.ok ? null : budget.error
 }
 
 function firstNormalizedOps(...values: unknown[]): unknown[] | null {

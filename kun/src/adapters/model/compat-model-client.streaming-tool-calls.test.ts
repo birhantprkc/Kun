@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { CompatModelClient, type ModelStreamLimits } from './compat-model-client.js'
+import {
+  ModelStreamResourceBudget,
+  TOOL_ARGUMENT_PART_COMPACTION_WINDOW,
+  type PendingToolCall
+} from './model-stream-resource-budget.js'
 import type { ModelCapabilityMetadata } from '../../contracts/capabilities.js'
 import type { ModelRequest, ModelStreamChunk } from '../../ports/model-client.js'
 
@@ -90,6 +95,17 @@ function completed(chunks: ModelStreamChunk[]): Extract<ModelStreamChunk, { kind
   const last = chunks.at(-1)
   if (!last || last.kind !== 'completed') throw new Error('stream did not end with completed')
   return last
+}
+
+function expectResourceLimit(chunk: ModelStreamChunk | undefined, messagePrefix: string): void {
+  expect(chunk).toMatchObject({ kind: 'error', code: 'stream_resource_limit' })
+  if (!chunk || chunk.kind !== 'error') throw new Error('expected stream resource error')
+  expect(chunk.message).toMatch(new RegExp(`^${messagePrefix}`))
+  expect(chunk.message).toContain('responseBytes=')
+  expect(chunk.message).toContain('frames=')
+  expect(chunk.message).toContain('pendingToolCalls=')
+  expect(chunk.message).toContain('pendingArgumentBytes=')
+  expect(chunk.message).toContain('pendingArgumentFragments=')
 }
 
 function chatToolDelta(d: { index: number; id?: string; name?: string; args?: string }): string {
@@ -243,11 +259,8 @@ describe('CompatModelClient streaming resource limits', () => {
       { maxBufferBytes: 64, maxFrameBytes: 512, maxTotalBytes: 512 }
     ).stream(request()))
 
-    expect(chunks).toEqual([{
-      kind: 'error',
-      message: 'model stream exceeded 64 buffered SSE bytes',
-      code: 'stream_resource_limit'
-    }])
+    expect(chunks).toHaveLength(1)
+    expectResourceLimit(chunks[0], 'model stream exceeded 64 buffered SSE bytes')
     expect(cancellations).not.toHaveLength(0)
   })
 
@@ -257,22 +270,16 @@ describe('CompatModelClient streaming resource limits', () => {
       undefined,
       { maxBufferBytes: 4_096, maxFrameBytes: 128, maxTotalBytes: 4_096 }
     ).stream(request()))
-    expect(oversized).toEqual([{
-      kind: 'error',
-      message: 'model stream exceeded 128 SSE frame bytes',
-      code: 'stream_resource_limit'
-    }])
+    expect(oversized).toHaveLength(1)
+    expectResourceLimit(oversized[0], 'model stream exceeded 128 SSE frame bytes')
 
     const frameStorm = await drain(makeClient(
       streamingFetch([': keepalive\n\n', ': keepalive\n\n']),
       undefined,
       { maxFrames: 1, maxBufferBytes: 4_096, maxFrameBytes: 4_096, maxTotalBytes: 4_096 }
     ).stream(request()))
-    expect(frameStorm).toEqual([{
-      kind: 'error',
-      message: 'model stream exceeded 1 SSE frames',
-      code: 'stream_resource_limit'
-    }])
+    expect(frameStorm).toHaveLength(1)
+    expectResourceLimit(frameStorm[0], 'model stream exceeded 1 SSE frames')
   })
 
   it('bounds cumulative emitted text without completing a partial response', async () => {
@@ -285,14 +292,9 @@ describe('CompatModelClient streaming resource limits', () => {
       { maxOutputBytes: 6, maxBufferBytes: 4_096, maxFrameBytes: 4_096, maxTotalBytes: 4_096 }
     ).stream(request()))
 
-    expect(chunks).toEqual([
-      { kind: 'assistant_text_delta', text: 'abc' },
-      {
-        kind: 'error',
-        message: 'model stream exceeded 6 response text and reasoning bytes',
-        code: 'stream_resource_limit'
-      }
-    ])
+    expect(chunks[0]).toEqual({ kind: 'assistant_text_delta', text: 'abc' })
+    expect(chunks).toHaveLength(2)
+    expectResourceLimit(chunks[1], 'model stream exceeded 6 response text and reasoning bytes')
   })
 
   it('applies raw argument limits before Chat, Responses, or Messages tool calls complete', async () => {
@@ -307,11 +309,14 @@ describe('CompatModelClient streaming resource limits', () => {
       undefined,
       limits
     ).stream(request()))
-    expect(chat).toEqual([{
-      kind: 'error',
-      message: 'model stream exceeded 8 bytes for one tool argument',
-      code: 'stream_resource_limit'
-    }])
+    expect(chat).toHaveLength(1)
+    expect(chat[0]).toMatchObject({ kind: 'error', code: 'stream_resource_limit' })
+    if (chat[0].kind !== 'error') throw new Error('expected stream resource error')
+    expect(chat[0].message).toMatch(/^model stream exceeded 8 bytes for one tool argument/)
+    expect(chat[0].message).toContain('tool=edit')
+    expect(chat[0].message).toContain('argumentBytes=9')
+    expect(chat[0].message).toContain('fragments=1')
+    expect(chat[0].message).not.toContain('xxxxxxxxx')
 
     const responsesClient = new CompatModelClient({
       baseUrl: 'https://provider.example/v1/responses',
@@ -327,7 +332,10 @@ describe('CompatModelClient streaming resource limits', () => {
       streamLimits: limits
     })
     const responses = await drain(responsesClient.stream(request({})))
-    expect(responses).toEqual(chat)
+    expect(responses).toHaveLength(1)
+    expect(responses[0]).toMatchObject({ kind: 'error', code: 'stream_resource_limit' })
+    if (responses[0].kind !== 'error') throw new Error('expected stream resource error')
+    expect(responses[0].message).toContain('argumentBytes=9')
 
     const messagesClient = new CompatModelClient({
       baseUrl: 'https://provider.example/anthropic',
@@ -341,10 +349,14 @@ describe('CompatModelClient streaming resource limits', () => {
       streamLimits: limits
     })
     const messages = await drain(messagesClient.stream(request()))
-    expect(messages).toEqual(chat)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({ kind: 'error', code: 'stream_resource_limit' })
+    if (messages[0].kind !== 'error') throw new Error('expected stream resource error')
+    expect(messages[0].message).toContain('tool=edit')
+    expect(messages[0].message).toContain('argumentBytes=9')
   })
 
-  it('caps pending call cardinality and fragmented arguments before they can grow parser state', async () => {
+  it('caps pending call cardinality while accepting highly fragmented arguments', async () => {
     const calls = await drain(makeClient(
       streamingFetch([
         chatToolDelta({ index: 0, id: 'call_1', name: 'edit' }),
@@ -353,32 +365,212 @@ describe('CompatModelClient streaming resource limits', () => {
       undefined,
       { maxPendingToolCalls: 1, maxBufferBytes: 4_096, maxFrameBytes: 4_096, maxTotalBytes: 4_096 }
     ).stream(request()))
-    expect(calls).toEqual([{
-      kind: 'error',
-      message: 'model stream exceeded 1 pending tool calls',
-      code: 'stream_resource_limit'
-    }])
+    expect(calls).toHaveLength(1)
+    expectResourceLimit(calls[0], 'model stream exceeded 1 pending tool calls')
 
+    const argumentValue = 'x'.repeat(1_100)
+    const frames = [chatToolDelta({ index: 0, id: 'call_1', name: 'edit', args: '{"value":"' })]
+    frames.push(...[...argumentValue].map((args) => chatToolDelta({ index: 0, args })))
+    frames.push(chatToolDelta({ index: 0, args: '"}' }), chatFinish('tool_calls'))
     const fragments = await drain(makeClient(
-      streamingFetch([
-        chatToolDelta({ index: 0, id: 'call_1', name: 'edit', args: 'a' }),
-        chatToolDelta({ index: 0, args: 'b' }),
-        chatToolDelta({ index: 0, args: 'c' })
-      ]),
+      streamingFetch(frames),
       undefined,
-      { maxToolArgumentFragments: 2, maxBufferBytes: 4_096, maxFrameBytes: 4_096, maxTotalBytes: 4_096 }
+      { maxBufferBytes: 16_384, maxFrameBytes: 4_096, maxTotalBytes: 512_000 }
     ).stream(request()))
-    expect(fragments).toEqual(expect.arrayContaining([{
-      kind: 'error',
-      message: 'model stream exceeded 2 fragments for one tool argument',
-      code: 'stream_resource_limit'
-    }]))
-    expect(fragments.at(-1)).toEqual({
-      kind: 'error',
-      message: 'model stream exceeded 2 fragments for one tool argument',
-      code: 'stream_resource_limit'
+    expect(toolCallCompletes(fragments)).toEqual([{
+      kind: 'tool_call_complete',
+      callId: 'call_1',
+      toolName: 'edit',
+      arguments: { value: argumentValue }
+    }])
+    expect(completed(fragments).stopReason).toBe('tool_calls')
+  })
+
+  it('accepts more than 1,024 Responses argument deltas', async () => {
+    const argumentValue = 'y'.repeat(1_100)
+    const frames = [frame({
+      type: 'response.output_item.added',
+      output_index: 0,
+      item: { type: 'function_call', call_id: 'response_1', name: 'edit' }
+    })]
+    frames.push(...[...`{"value":"${argumentValue}"}`].map((delta) => frame({
+      type: 'response.function_call_arguments.delta',
+      call_id: 'response_1',
+      output_index: 0,
+      delta
+    })))
+    frames.push(frame({
+      type: 'response.output_item.done',
+      output_index: 0,
+      item: { type: 'function_call', call_id: 'response_1', name: 'edit' }
+    }), frame({ type: 'response.completed', response: { status: 'completed', output: [] } }))
+    const client = new CompatModelClient({
+      baseUrl: 'https://provider.example/v1/responses',
+      apiKey: 'sk-test',
+      model: 'test-model',
+      endpointFormat: 'responses',
+      fetchImpl: streamingFetch(frames),
+      streamLimits: { maxBufferBytes: 16_384, maxFrameBytes: 4_096, maxTotalBytes: 512_000 }
     })
-    expect(fragments.some((chunk) => chunk.kind === 'tool_call_complete' || chunk.kind === 'completed')).toBe(false)
+    const chunks = await drain(client.stream(request()))
+    expect(toolCallCompletes(chunks)).toEqual([{
+      kind: 'tool_call_complete',
+      callId: 'response_1',
+      toolName: 'edit',
+      arguments: { value: argumentValue }
+    }])
+    expect(completed(chunks).stopReason).toBe('tool_calls')
+  })
+
+  it('accepts more than 1,024 Anthropic Messages argument deltas', async () => {
+    const argumentValue = 'z'.repeat(1_100)
+    const frames = [frame({
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'tool_use', id: 'message_1', name: 'edit' }
+    })]
+    frames.push(...[...`{"value":"${argumentValue}"}`].map((partial_json) => frame({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'input_json_delta', partial_json }
+    })))
+    frames.push(
+      frame({ type: 'content_block_stop', index: 0 }),
+      frame({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: {} }),
+      frame({ type: 'message_stop' })
+    )
+    const client = new CompatModelClient({
+      baseUrl: 'https://provider.example/anthropic',
+      apiKey: 'sk-test',
+      model: 'test-model',
+      endpointFormat: 'messages',
+      fetchImpl: streamingFetch(frames),
+      streamLimits: { maxBufferBytes: 16_384, maxFrameBytes: 4_096, maxTotalBytes: 512_000 }
+    })
+    const chunks = await drain(client.stream(request()))
+    expect(toolCallCompletes(chunks)).toEqual([{
+      kind: 'tool_call_complete',
+      callId: 'message_1',
+      toolName: 'edit',
+      arguments: { value: argumentValue }
+    }])
+    expect(completed(chunks).stopReason).toBe('tool_calls')
+  })
+
+  it('does not downgrade an Anthropic max_tokens terminal at message_stop', async () => {
+    const client = new CompatModelClient({
+      baseUrl: 'https://provider.example/anthropic',
+      apiKey: 'sk-test',
+      model: 'test-model',
+      endpointFormat: 'messages',
+      fetchImpl: streamingFetch([
+        frame({
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: 'partial answer' }
+        }),
+        frame({ type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: {} }),
+        frame({ type: 'message_stop' })
+      ])
+    })
+
+    const chunks = await drain(client.stream(request()))
+
+    expect(completed(chunks).stopReason).toBe('length')
+  })
+
+  it('preserves Anthropic length and error terminals after completed tool blocks', async () => {
+    const toolFrames = [
+      frame({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'message_1', name: 'edit' }
+      }),
+      frame({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: '{}' }
+      }),
+      frame({ type: 'content_block_stop', index: 0 })
+    ]
+    const makeMessagesClient = (terminalFrames: string[]) => new CompatModelClient({
+      baseUrl: 'https://provider.example/anthropic',
+      apiKey: 'sk-test',
+      model: 'test-model',
+      endpointFormat: 'messages',
+      fetchImpl: streamingFetch([...toolFrames, ...terminalFrames])
+    })
+
+    const lengthChunks = await drain(makeMessagesClient([
+      frame({ type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: {} }),
+      frame({ type: 'message_stop' })
+    ]).stream(request()))
+    expect(toolCallCompletes(lengthChunks)).toHaveLength(1)
+    expect(completed(lengthChunks).stopReason).toBe('length')
+
+    const errorChunks = await drain(makeMessagesClient([
+      frame({ type: 'error', error: { message: 'provider refused' } }),
+      frame({ type: 'message_stop' })
+    ]).stream(request()))
+    expect(toolCallCompletes(errorChunks)).toHaveLength(1)
+    expect(errorChunks).toContainEqual(expect.objectContaining({ kind: 'error' }))
+    expect(completed(errorChunks).stopReason).toBe('error')
+  })
+
+  it('compacts retained argument parts without changing reconstructed JSON', () => {
+    const budget = new ModelStreamResourceBudget({
+      maxBufferBytes: 1_000_000,
+      maxFrameBytes: 1_000_000,
+      maxTotalBytes: 1_000_000,
+      maxFrames: 65_536,
+      maxOutputBytes: 1_000_000,
+      maxPendingToolCalls: 32,
+      maxPendingToolArgumentBytes: 1_000_000,
+      maxTotalPendingToolArgumentBytes: 1_000_000,
+      maxCompletedToolCalls: 32,
+      maxCompletedToolArgumentBytes: 1_000_000
+    })
+    const pending: PendingToolCall = {
+      name: 'edit', argumentParts: [], argumentBytes: 0, argumentFragments: 0
+    }
+    for (let index = 0; index < 5_000; index += 1) budget.appendArguments(pending, 'x')
+    expect(pending.argumentFragments).toBe(5_000)
+    expect(pending.argumentParts.length).toBeLessThanOrEqual(TOOL_ARGUMENT_PART_COMPACTION_WINDOW)
+    expect(pending.argumentBlocks?.length).toBeGreaterThan(1)
+    expect(budget.pendingArguments(pending)).toBe('x'.repeat(5_000))
+  })
+
+  it('bounds and sanitizes provider-controlled tool names in limit diagnostics', () => {
+    const budget = new ModelStreamResourceBudget({
+      maxBufferBytes: 1_000,
+      maxFrameBytes: 1_000,
+      maxTotalBytes: 1_000,
+      maxFrames: 100,
+      maxOutputBytes: 1_000,
+      maxPendingToolCalls: 2,
+      maxPendingToolArgumentBytes: 1,
+      maxTotalPendingToolArgumentBytes: 2,
+      maxCompletedToolCalls: 2,
+      maxCompletedToolArgumentBytes: 2
+    })
+    const pending: PendingToolCall = {
+      name: `edit\n${'x'.repeat(10_000)}SECRET_TAIL`,
+      argumentParts: [],
+      argumentBytes: 0,
+      argumentFragments: 0
+    }
+
+    let message = ''
+    try {
+      budget.appendArguments(pending, 'xx')
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+
+    expect(message).toMatch(/^model stream exceeded 1 bytes for one tool argument/)
+    expect(message).not.toContain('\n')
+    expect(message).not.toContain('SECRET_TAIL')
+    expect(Buffer.byteLength(message, 'utf8')).toBeLessThan(1_024)
   })
 
   it('uses the same body ceiling for application/json fallback responses', async () => {

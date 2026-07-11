@@ -4,6 +4,7 @@
  * keeping the orchestration (and its tests) free of both.
  */
 import { AgentSdkRuntime, type SdkRuntimeDeps, type SdkTurnContext } from './agent-sdk-runtime.js'
+import type { SdkStreamResourceLimits } from './sdk-event-mapper.js'
 import { resolveSdkModel, type ToolApprovalDecision } from './sdk-options-builder.js'
 import type { BridgeableTool, KunToolResult } from './sdk-tool-bridge.js'
 import type { SdkApi } from './sdk-protocol.js'
@@ -52,6 +53,7 @@ import {
   DEFAULT_SDK_HISTORY_TRANSCRIPT_MAX_BYTES
 } from './sdk-context-assembler.js'
 import { shellSpawnEnv } from '../../adapters/tool/builtin-tool-utils.js'
+import type { TurnLimitsConfig } from '../../loop/turn-limits.js'
 
 export interface AgentSdkRuntimeFactoryDeps {
   registry: CapabilityRegistry
@@ -96,7 +98,9 @@ export interface AgentSdkRuntimeFactoryDeps {
   /** Cap for the replayed history transcript (bytes); defaults to the assembler's. */
   historyTranscriptMaxBytes?: number
   /** Native runtime safety limits, also applied to delegated Agent SDK turns. */
-  turnLimits?: { maxWallTimeMs?: number }
+  turnLimits?: TurnLimitsConfig
+  /** Optional SDK stream-budget overrides; omitted in normal production wiring. */
+  sdkStreamLimits?: Partial<SdkStreamResourceLimits>
   pathToClaudeCodeExecutable?: string
 }
 
@@ -617,6 +621,9 @@ export function createAgentSdkRuntime(deps: AgentSdkRuntimeFactoryDeps): AgentSd
     kunSystemPrompt: () => deps.prefix.systemPrompt,
     nextId: (prefix) => deps.ids.next(prefix),
     getTurnLimits: () => deps.turnLimits,
+    ...(deps.sdkStreamLimits
+      ? { getSdkStreamLimits: () => deps.sdkStreamLimits }
+      : {}),
     ...(deps.pathToClaudeCodeExecutable
       ? { pathToClaudeCodeExecutable: deps.pathToClaudeCodeExecutable }
       : {})

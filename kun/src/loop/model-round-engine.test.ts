@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { ModelRequest, ModelStreamChunk } from '../ports/model-client.js'
 import type { CacheRequestSignature } from '../cache/cache-diagnostics.js'
 import { ModelRoundEngine, type ModelRoundEngineDeps } from './model-round-engine.js'
@@ -82,6 +82,8 @@ function harness(values: readonly ModelStreamChunk[]) {
   const trace: string[] = []
   const requests: ModelRequest[] = []
   const cacheSignatures: CacheRequestSignature[] = []
+  const recordedEvents: Array<Parameters<ModelRoundEngineDeps['events']['record']>[0]> = []
+  const appliedItems: Array<Parameters<ModelRoundEngineDeps['turns']['applyItem']>[1]> = []
   let id = 0
   let streamFactory = (): AsyncIterable<ModelStreamChunk> => chunks(values)
   const deps: ModelRoundEngineDeps = {
@@ -93,12 +95,16 @@ function harness(values: readonly ModelStreamChunk[]) {
     },
     events: {
       record: async (event) => {
+        recordedEvents.push(event)
         trace.push(`event:${event.kind}`)
         return event as never
       }
     },
     turns: {
-      applyItem: async (_threadId, item) => { trace.push(`item:${item.kind}`) }
+      applyItem: async (_threadId, item) => {
+        appliedItems.push(item)
+        trace.push(`item:${item.kind}`)
+      }
     },
     usage: {
       record: (_threadId, _usage, signature) => {
@@ -124,6 +130,8 @@ function harness(values: readonly ModelStreamChunk[]) {
     trace,
     requests,
     cacheSignatures,
+    recordedEvents,
+    appliedItems,
     controller,
     engine,
     setStream: (next: () => AsyncIterable<ModelStreamChunk>) => { streamFactory = next },
@@ -173,6 +181,104 @@ describe('ModelRoundEngine', () => {
       outcome,
       trace: test.trace
     }).toEqual(LEGACY_TOOL_ROUND_REFERENCE)
+  })
+
+  it('coalesces provider-sized deltas without changing event order or final text', async () => {
+    const reasoning = 'r'.repeat(2_000)
+    const text = 't'.repeat(2_000)
+    const test = harness([
+      ...[...reasoning].map((value): ModelStreamChunk => ({
+        kind: 'assistant_reasoning_delta',
+        text: value
+      })),
+      ...[...text].map((value): ModelStreamChunk => ({
+        kind: 'assistant_text_delta',
+        text: value
+      })),
+      { kind: 'retrying', status: 429, attempt: 1, maxAttempts: 2, delayMs: 10 },
+      { kind: 'completed', stopReason: 'stop' }
+    ])
+
+    await expect(test.run()).resolves.toEqual(expect.objectContaining({ kind: 'completed' }))
+    const deltaPayloads = test.recordedEvents.flatMap((event) => {
+      if (
+        (event.kind === 'assistant_reasoning_delta' || event.kind === 'assistant_text_delta') &&
+        'item' in event &&
+        'text' in event.item
+      ) {
+        return [[event.kind, event.item.text]]
+      }
+      return []
+    })
+    expect(deltaPayloads).toEqual([
+      ['assistant_reasoning_delta', reasoning],
+      ['assistant_text_delta', text]
+    ])
+    expect(test.recordedEvents.map((event) => event.kind)).toEqual([
+      'assistant_reasoning_delta',
+      'assistant_text_delta',
+      'model_request_retry'
+    ])
+    expect(test.appliedItems.map((item) => [item.kind, 'text' in item ? item.text : ''])).toEqual([
+      ['assistant_reasoning', reasoning],
+      ['assistant_text', text]
+    ])
+  })
+
+  it('splits one large provider delta into replay-safe UTF-8 event blocks', async () => {
+    const text = `${'a'.repeat(4_095)}${'💡'.repeat(2_000)}`
+    const test = harness([
+      { kind: 'assistant_text_delta', text },
+      { kind: 'completed', stopReason: 'stop' }
+    ])
+
+    await expect(test.run()).resolves.toEqual(expect.objectContaining({ kind: 'completed' }))
+    const deltas = test.recordedEvents.filter((event) => event.kind === 'assistant_text_delta')
+    expect(deltas.length).toBeGreaterThan(1)
+    const retained = deltas.map((event) => {
+      if (
+        event.kind !== 'assistant_text_delta' ||
+        !('item' in event) ||
+        event.item.kind !== 'assistant_text'
+      ) return ''
+      return event.item.text
+    })
+    expect(retained.join('')).toBe(text)
+    expect(retained.every((value) => Buffer.byteLength(value, 'utf8') <= 4 * 1024)).toBe(true)
+  })
+
+  it('flushes a low-volume delta while the provider is paused and leaves no timer behind', async () => {
+    vi.useFakeTimers()
+    try {
+      let releaseProvider!: () => void
+      let providerWaiting!: () => void
+      const providerGate = new Promise<void>((resolve) => { releaseProvider = resolve })
+      const waiting = new Promise<void>((resolve) => { providerWaiting = resolve })
+      const test = harness([])
+      const stream = async function *(): AsyncIterable<ModelStreamChunk> {
+        yield { kind: 'assistant_text_delta', text: 'live' }
+        providerWaiting()
+        await providerGate
+        yield { kind: 'completed', stopReason: 'stop' }
+      }
+      test.setStream(() => stream())
+
+      const running = test.run()
+      await waiting
+      expect(test.recordedEvents).toHaveLength(0)
+      await vi.advanceTimersByTimeAsync(40)
+      expect(test.recordedEvents).toHaveLength(1)
+      expect(test.recordedEvents[0]).toMatchObject({
+        kind: 'assistant_text_delta',
+        item: { text: 'live' }
+      })
+
+      releaseProvider()
+      await expect(running).resolves.toEqual(expect.objectContaining({ kind: 'completed' }))
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('does not emit response_received after a per-step tool limit', async () => {
@@ -244,5 +350,31 @@ describe('ModelRoundEngine', () => {
       'stage:response_received',
       'item:assistant_text'
     ])
+  })
+
+  it('flushes pending deltas and the final item when the provider iterator throws', async () => {
+    const test = harness([])
+    const stream = async function *(): AsyncIterable<ModelStreamChunk> {
+      yield { kind: 'assistant_reasoning_delta', text: 'partial thought' }
+      throw new Error('provider disconnected')
+    }
+    test.setStream(() => stream())
+
+    await expect(test.run()).rejects.toThrow('provider disconnected')
+    expect(test.trace).toEqual([
+      'stage:pre_send',
+      'stage:post_send',
+      'event:assistant_reasoning_delta',
+      'item:assistant_reasoning'
+    ])
+    expect(test.recordedEvents[0]).toMatchObject({
+      kind: 'assistant_reasoning_delta',
+      item: { text: 'partial thought' }
+    })
+    expect(test.appliedItems[0]).toMatchObject({
+      kind: 'assistant_reasoning',
+      text: 'partial thought',
+      status: 'completed'
+    })
   })
 })

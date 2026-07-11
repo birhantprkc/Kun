@@ -12,6 +12,7 @@ import {
   DESIGN_EXPORT_CANVAS_TOOL_NAME,
   DESIGN_SVG_CREATE_TOOL_NAME,
   DESIGN_SYSTEM_TEMPLATE_TOOL_NAME,
+  DESIGN_UPDATE_SHAPES_MAX_OPS,
   DESIGN_UPDATE_SHAPES_TOOL_NAME,
   DESIGN_VALIDATE_TOOL_NAME
 } from './design-canvas-tool.js'
@@ -251,6 +252,8 @@ describe('dedicated design tools', () => {
     expect(tool.name).toBe(DESIGN_UPDATE_SHAPES_TOOL_NAME)
     expect(JSON.stringify(tool.inputSchema)).toContain('direct top-level ShapeOp')
     expect(tool.description).toContain('inspect the current canvas snapshot first')
+    expect(tool.description).toContain('20-50')
+    expect(JSON.stringify(tool.inputSchema)).toContain(`"maxItems":${DESIGN_UPDATE_SHAPES_MAX_OPS}`)
     const op = { op: 'add', shape: { type: 'rect', width: 40, height: 40 } }
     const result = await tool.execute({ ops: op }, context())
     expect(result.output).toMatchObject({
@@ -258,6 +261,39 @@ describe('dedicated design tools', () => {
       tool: DESIGN_UPDATE_SHAPES_TOOL_NAME,
       ops: [op]
     })
+  })
+
+  it('enforces design_update_shapes operation and structural budgets', async () => {
+    const tool = createDesignUpdateShapesTool()
+    const validOps = Array.from({ length: 50 }, (_, index) => ({
+      op: 'add', shape: { id: `shape_${index}`, type: 'rect', width: 10, height: 10 }
+    }))
+    const valid = await tool.execute({ ops: validOps }, context())
+    expect(valid.isError).toBeUndefined()
+    expect(valid.output).toMatchObject({ ok: true, ops: validOps })
+
+    const oversized = await tool.execute({
+      ops: Array.from({ length: DESIGN_UPDATE_SHAPES_MAX_OPS + 1 }, (_, index) => ({
+        op: 'delete', id: `shape_${index}`
+      }))
+    }, context())
+    expect(oversized.isError).toBe(true)
+    expect(oversized.output).toMatchObject({
+      ok: false,
+      error: expect.stringContaining(`at most ${DESIGN_UPDATE_SHAPES_MAX_OPS} operations`)
+    })
+
+    let nested: Record<string, unknown> = { value: true }
+    for (let depth = 0; depth < 40; depth += 1) nested = { child: nested }
+    const tooDeep = await tool.execute({ ops: [{ op: 'add', shape: nested }] }, context())
+    expect(tooDeep.isError).toBe(true)
+    expect(tooDeep.output).toMatchObject({ ok: false, error: expect.stringContaining('nesting depth 32') })
+
+    const tooLarge = await tool.execute({
+      ops: [{ op: 'add', shape: { type: 'text', text: 'x'.repeat(512 * 1024) } }]
+    }, context())
+    expect(tooLarge.isError).toBe(true)
+    expect(tooLarge.output).toMatchObject({ ok: false, error: expect.stringContaining('exceed 524288 bytes') })
   })
 
   it('accepts a direct top-level ShapeOp when the model omits ops', async () => {

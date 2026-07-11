@@ -7,7 +7,9 @@ import type { ThreadEventStreamRegistry } from '../thread-event-stream-registry.
 export const HEARTBEAT_INTERVAL_MS = 15_000
 export const DEFAULT_MAX_PERSISTED_REPLAY_EVENTS = 256
 export const DEFAULT_MAX_PERSISTED_REPLAY_BYTES = 512 * 1024
-export const DEFAULT_MAX_PERSISTED_REPLAY_RECORD_BYTES = 1 * 1024 * 1024
+// Must accommodate the bounded 1 MiB model tool argument plus JSON escaping
+// and the surrounding item-created event envelope.
+export const DEFAULT_MAX_PERSISTED_REPLAY_RECORD_BYTES = 4 * 1024 * 1024
 export const DEFAULT_MAX_LIVE_EVENTS_DURING_REPLAY_BYTES = 512 * 1024
 /**
  * Events published while a slow persisted replay is in flight. If this fills,

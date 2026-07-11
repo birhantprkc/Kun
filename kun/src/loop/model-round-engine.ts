@@ -1,4 +1,5 @@
 import type { CacheRequestSignature } from '../cache/cache-diagnostics.js'
+import { utf8PrefixWithinBytes } from '../shared/utf8-text-blocks.js'
 import type { PipelineStage } from '../contracts/events.js'
 import type { ModelClient, ModelRequest } from '../ports/model-client.js'
 import type { IdGenerator } from '../ports/id-generator.js'
@@ -59,6 +60,15 @@ export type ModelRoundEngineDeps = {
   recordToolCallLimit: (threadId: string, turnId: string, message: string) => Promise<void>
 }
 
+const ASSISTANT_DELTA_EVENT_MAX_BYTES = 4 * 1024
+const ASSISTANT_DELTA_EVENT_MAX_DELAY_MS = 40
+
+type AssistantDeltaEvent = {
+  kind: 'assistant_text_delta' | 'assistant_reasoning_delta'
+  itemId: string
+  text: string
+}
+
 /**
  * Runs one already-prepared model request and owns only stream-local side
  * effects. The outer AgentLoop retains context resolution, compaction, tool
@@ -109,6 +119,37 @@ export class ModelRoundEngine {
         )
       }
     }
+    const deltaEvents = new AssistantDeltaEventCoalescer(async (delta) => {
+      if (delta.kind === 'assistant_text_delta') {
+        await this.deps.events.record({
+          kind: delta.kind,
+          threadId: input.threadId,
+          turnId: input.turnId,
+          itemId: delta.itemId,
+          item: makeAssistantTextItem({
+            id: delta.itemId,
+            turnId: input.turnId,
+            threadId: input.threadId,
+            text: delta.text,
+            status: 'running'
+          })
+        })
+        return
+      }
+      await this.deps.events.record({
+        kind: delta.kind,
+        threadId: input.threadId,
+        turnId: input.turnId,
+        itemId: delta.itemId,
+        item: makeAssistantReasoningItem({
+          id: delta.itemId,
+          turnId: input.turnId,
+          threadId: input.threadId,
+          text: delta.text,
+          status: 'running'
+        })
+      })
+    })
 
     await this.deps.recordPipelineStage(
       input.threadId,
@@ -122,158 +163,157 @@ export class ModelRoundEngine {
       'post_send',
       input.postSendDetails
     )
-    for await (const chunk of this.deps.model.stream(input.request)) {
-      if (input.signal.aborted) {
-        await persistAccumulatedResponse()
-        return { kind: 'aborted' }
-      }
-      const reduction = collector.reduce(chunk)
-      if (reduction.terminal) {
-        const message = reduction.terminal.message
-        this.deps.rememberFailure(input.turnId, {
-          error: message,
-          code: 'tool_call_limit_exceeded',
-          severity: 'warning'
-        })
-        await this.deps.recordToolCallLimit(input.threadId, input.turnId, message)
-        await persistAccumulatedResponse()
-        return { kind: 'failed' }
-      }
-      for (const intent of reduction.intents) {
-        switch (intent.kind) {
-          case 'assistant_text_delta':
-            textItemId ||= this.deps.ids.next('item_text')
-            await this.deps.events.record({
-              kind: 'assistant_text_delta',
-              threadId: input.threadId,
-              turnId: input.turnId,
-              itemId: textItemId,
-              item: makeAssistantTextItem({
-                id: textItemId,
-                turnId: input.turnId,
-                threadId: input.threadId,
-                text: intent.text,
-                status: 'running'
+    try {
+      for await (const chunk of this.deps.model.stream(input.request)) {
+        if (input.signal.aborted) {
+          await deltaEvents.flush()
+          await persistAccumulatedResponse()
+          return { kind: 'aborted' }
+        }
+        const reduction = collector.reduce(chunk)
+        if (reduction.terminal) {
+          await deltaEvents.flush()
+          const message = reduction.terminal.message
+          this.deps.rememberFailure(input.turnId, {
+            error: message,
+            code: 'tool_call_limit_exceeded',
+            severity: 'warning'
+          })
+          await this.deps.recordToolCallLimit(input.threadId, input.turnId, message)
+          await persistAccumulatedResponse()
+          return { kind: 'failed' }
+        }
+        for (const intent of reduction.intents) {
+          if (
+            intent.kind !== 'assistant_text_delta' &&
+            intent.kind !== 'assistant_reasoning_delta'
+          ) {
+            await deltaEvents.flush()
+          }
+          switch (intent.kind) {
+            case 'assistant_text_delta':
+              textItemId ||= this.deps.ids.next('item_text')
+              await deltaEvents.append({
+                kind: intent.kind,
+                itemId: textItemId,
+                text: intent.text
               })
-            })
-            break
-          case 'assistant_reasoning_delta':
-            reasoningItemId ||= this.deps.ids.next('item_reasoning')
-            await this.deps.events.record({
-              kind: 'assistant_reasoning_delta',
-              threadId: input.threadId,
-              turnId: input.turnId,
-              itemId: reasoningItemId,
-              item: makeAssistantReasoningItem({
-                id: reasoningItemId,
-                turnId: input.turnId,
-                threadId: input.threadId,
-                text: intent.text,
-                status: 'running'
+              break
+            case 'assistant_reasoning_delta':
+              reasoningItemId ||= this.deps.ids.next('item_reasoning')
+              await deltaEvents.append({
+                kind: intent.kind,
+                itemId: reasoningItemId,
+                text: intent.text
               })
-            })
-            break
-          case 'retrying':
-            await this.deps.events.record({
-              kind: 'model_request_retry',
-              threadId: input.threadId,
-              turnId: input.turnId,
-              status: intent.status,
-              attempt: intent.attempt,
-              maxAttempts: intent.maxAttempts,
-              delayMs: intent.delayMs
-            })
-            break
-          case 'tool_call_ready': {
-            const itemId = `item_tool_${input.turnId}_${intent.call.callId}`
-            await this.deps.turns.applyItem(
-              input.threadId,
-              makeToolCallItem({
-                id: itemId,
-                turnId: input.turnId,
+              break
+            case 'retrying':
+              await this.deps.events.record({
+                kind: 'model_request_retry',
                 threadId: input.threadId,
+                turnId: input.turnId,
+                status: intent.status,
+                attempt: intent.attempt,
+                maxAttempts: intent.maxAttempts,
+                delayMs: intent.delayMs
+              })
+              break
+            case 'tool_call_ready': {
+              const itemId = `item_tool_${input.turnId}_${intent.call.callId}`
+              await this.deps.turns.applyItem(
+                input.threadId,
+                makeToolCallItem({
+                  id: itemId,
+                  turnId: input.turnId,
+                  threadId: input.threadId,
+                  callId: intent.call.callId,
+                  toolName: intent.call.toolName,
+                  toolKind: intent.call.toolKind,
+                  arguments: intent.call.arguments,
+                  ...(intent.repairNotes.length
+                    ? { summary: `Repaired tool arguments: ${intent.repairNotes.join('; ')}` }
+                    : {})
+                })
+              )
+              await this.deps.events.record({
+                kind: 'tool_call_ready',
+                threadId: input.threadId,
+                turnId: input.turnId,
+                itemId,
                 callId: intent.call.callId,
                 toolName: intent.call.toolName,
-                toolKind: intent.call.toolKind,
-                arguments: intent.call.arguments,
-                ...(intent.repairNotes.length
-                  ? { summary: `Repaired tool arguments: ${intent.repairNotes.join('; ')}` }
-                  : {})
+                readyCount: collector.toolCallCount
               })
-            )
-            await this.deps.events.record({
-              kind: 'tool_call_ready',
-              threadId: input.threadId,
-              turnId: input.turnId,
-              itemId,
-              callId: intent.call.callId,
-              toolName: intent.call.toolName,
-              readyCount: collector.toolCallCount
-            })
-            break
-          }
-          case 'generated_image': {
-            const generated = await input.writeGeneratedImage({
-              imageBase64: intent.imageBase64,
-              mimeType: intent.mimeType
-            })
-            const textIntent = collector.appendAssistantText(generated.markdown)
-            textItemId ||= this.deps.ids.next('item_text')
-            await this.deps.events.record({
-              kind: 'assistant_text_delta',
-              threadId: input.threadId,
-              turnId: input.turnId,
-              itemId: textItemId,
-              item: makeAssistantTextItem({
-                id: textItemId,
-                turnId: input.turnId,
+              break
+            }
+            case 'generated_image': {
+              const generated = await input.writeGeneratedImage({
+                imageBase64: intent.imageBase64,
+                mimeType: intent.mimeType
+              })
+              const textIntent = collector.appendAssistantText(generated.markdown)
+              textItemId ||= this.deps.ids.next('item_text')
+              await deltaEvents.append({
+                kind: textIntent.kind,
+                itemId: textItemId,
+                text: textIntent.text
+              })
+              break
+            }
+            case 'usage': {
+              this.deps.telemetry.recordPromptPressure(
+                input.threadId,
+                input.request.model,
+                intent.usage.promptTokens
+              )
+              const usage = this.deps.usage.record(input.threadId, intent.usage, input.cacheSignature)
+              await this.deps.recordGoalUsage(input.threadId, intent.usage.totalTokens)
+              await this.deps.events.record({
+                kind: 'usage',
                 threadId: input.threadId,
-                text: textIntent.text,
-                status: 'running'
+                turnId: input.turnId,
+                model: input.request.model,
+                usage
               })
-            })
-            break
+              break
+            }
+            case 'model_error':
+              this.deps.rememberFailure(input.turnId, {
+                error: intent.message,
+                ...(intent.code ? { code: intent.code } : {}),
+                severity: 'error'
+              })
+              await this.deps.events.record({
+                kind: 'error',
+                threadId: input.threadId,
+                turnId: input.turnId,
+                message: intent.message,
+                code: intent.code,
+                severity: 'error'
+              })
+              break
           }
-          case 'usage': {
-            this.deps.telemetry.recordPromptPressure(
-              input.threadId,
-              input.request.model,
-              intent.usage.promptTokens
-            )
-            const usage = this.deps.usage.record(input.threadId, intent.usage, input.cacheSignature)
-            await this.deps.recordGoalUsage(input.threadId, intent.usage.totalTokens)
-            await this.deps.events.record({
-              kind: 'usage',
-              threadId: input.threadId,
-              turnId: input.turnId,
-              model: input.request.model,
-              usage
-            })
-            break
-          }
-          case 'model_error':
-            this.deps.rememberFailure(input.turnId, {
-              error: intent.message,
-              ...(intent.code ? { code: intent.code } : {}),
-              severity: 'error'
-            })
-            await this.deps.events.record({
-              kind: 'error',
-              threadId: input.threadId,
-              turnId: input.turnId,
-              message: intent.message,
-              code: intent.code,
-              severity: 'error'
-            })
-            break
         }
       }
+    } catch (error) {
+      let streamFailure = error
+      try {
+        await deltaEvents.flush()
+      } catch (flushError) {
+        streamFailure = flushError
+      }
+      await persistAccumulatedResponse()
+      throw streamFailure
+    } finally {
+      deltaEvents.dispose()
     }
 
     if (input.signal.aborted) {
+      await deltaEvents.flush()
       await persistAccumulatedResponse()
       return { kind: 'aborted' }
     }
+    await deltaEvents.flush()
     const snapshot = collector.snapshot()
     await this.deps.recordPipelineStage(input.threadId, input.turnId, 'response_received', {
       stopReason: snapshot.stopReason,
@@ -284,5 +324,113 @@ export class ModelRoundEngine {
     return snapshot.toolCalls.length > 0
       ? { kind: 'tool_calls', snapshot }
       : { kind: 'completed', snapshot }
+  }
+}
+
+type PendingAssistantDeltaEvent = Omit<AssistantDeltaEvent, 'text'> & {
+  parts: string[]
+  bytes: number
+}
+
+/**
+ * Coalesces adjacent provider deltas into persistence-sized events. A byte
+ * ceiling keeps large bursts moving immediately, while the short timer keeps
+ * low-volume output live even when the provider pauses between chunks.
+ */
+class AssistantDeltaEventCoalescer {
+  private pending: PendingAssistantDeltaEvent | undefined
+  private timer: NodeJS.Timeout | undefined
+  private writeTail: Promise<void> = Promise.resolve()
+  private writeError: unknown
+  private hasWriteError = false
+
+  constructor(
+    private readonly emit: (event: AssistantDeltaEvent) => Promise<void>,
+    private readonly maxBytes = ASSISTANT_DELTA_EVENT_MAX_BYTES,
+    private readonly maxDelayMs = ASSISTANT_DELTA_EVENT_MAX_DELAY_MS
+  ) {}
+
+  async append(event: AssistantDeltaEvent): Promise<void> {
+    this.throwWriteError()
+    if (!event.text) return
+    if (
+      this.pending &&
+      (this.pending.kind !== event.kind || this.pending.itemId !== event.itemId)
+    ) {
+      await this.flush()
+    }
+    let offset = 0
+    while (offset < event.text.length) {
+      if (!this.pending) {
+        this.pending = {
+          kind: event.kind,
+          itemId: event.itemId,
+          parts: [],
+          bytes: 0
+        }
+        this.scheduleFlush()
+      }
+      const prefix = utf8PrefixWithinBytes(
+        event.text,
+        offset,
+        this.maxBytes - this.pending.bytes
+      )
+      if (prefix.end === offset) {
+        await this.flush()
+        continue
+      }
+      this.pending.parts.push(event.text.slice(offset, prefix.end))
+      this.pending.bytes += prefix.bytes
+      offset = prefix.end
+      if (this.pending.bytes >= this.maxBytes) await this.flush()
+    }
+  }
+
+  async flush(): Promise<void> {
+    this.cancelTimer()
+    this.enqueuePending()
+    await this.writeTail
+    this.throwWriteError()
+  }
+
+  dispose(): void {
+    this.cancelTimer()
+  }
+
+  private scheduleFlush(): void {
+    this.timer = setTimeout(() => {
+      this.timer = undefined
+      this.enqueuePending()
+    }, this.maxDelayMs)
+    this.timer.unref?.()
+  }
+
+  private cancelTimer(): void {
+    if (!this.timer) return
+    clearTimeout(this.timer)
+    this.timer = undefined
+  }
+
+  private enqueuePending(): void {
+    const pending = this.pending
+    if (!pending) return
+    this.pending = undefined
+    this.writeTail = this.writeTail.then(async () => {
+      if (this.hasWriteError) return
+      try {
+        await this.emit({
+          kind: pending.kind,
+          itemId: pending.itemId,
+          text: pending.parts.join('')
+        })
+      } catch (error) {
+        this.hasWriteError = true
+        this.writeError = error
+      }
+    })
+  }
+
+  private throwWriteError(): void {
+    if (this.hasWriteError) throw this.writeError
   }
 }

@@ -86,7 +86,9 @@ export function decodeAnthropicMessagesStreamPayload(input: {
     const usagePayload = recordValue(input.payload, 'usage')
     if (usagePayload) usage = input.normalizeUsage(usagePayload)
   } else if (type === 'message_stop') {
-    finishReason = finishReason ?? 'stop'
+    // `message_delta` carries the semantic reason. The outer stream merger
+    // preserves it when this generic terminal frame arrives.
+    finishReason = 'stop'
   } else if (type === 'error') {
     chunks.push({ kind: 'error', message: responseErrorMessage(input.payload), code: 'messages_stream_error' })
     finishReason = 'error'

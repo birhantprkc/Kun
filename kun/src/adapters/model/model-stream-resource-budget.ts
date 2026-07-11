@@ -3,10 +3,16 @@ import type { ModelStreamChunk } from '../../ports/model-client.js'
 export type PendingToolCall = {
   index?: number
   name?: string
+  /** Completed fixed-size blocks; never rejoined until the call completes. */
+  argumentBlocks?: string[]
+  /** Current block of provider deltas. */
   argumentParts: string[]
   argumentBytes: number
   argumentFragments: number
 }
+
+export const TOOL_ARGUMENT_PART_COMPACTION_WINDOW = 256
+const TOOL_DIAGNOSTIC_NAME_MAX_CODE_POINTS = 96
 
 export type ModelStreamLimits = {
   maxBufferBytes: number
@@ -17,8 +23,6 @@ export type ModelStreamLimits = {
   maxPendingToolCalls: number
   maxPendingToolArgumentBytes: number
   maxTotalPendingToolArgumentBytes: number
-  maxToolArgumentFragments: number
-  maxTotalToolArgumentFragments: number
   maxCompletedToolCalls: number
   maxCompletedToolArgumentBytes: number
 }
@@ -27,13 +31,11 @@ export const DEFAULT_MODEL_STREAM_LIMITS: ModelStreamLimits = {
   maxBufferBytes: 20 * 1024 * 1024,
   maxFrameBytes: 16 * 1024 * 1024,
   maxTotalBytes: 32 * 1024 * 1024,
-  maxFrames: 8_192,
+  maxFrames: 65_536,
   maxOutputBytes: 8 * 1024 * 1024,
   maxPendingToolCalls: 32,
   maxPendingToolArgumentBytes: 1 * 1024 * 1024,
   maxTotalPendingToolArgumentBytes: 4 * 1024 * 1024,
-  maxToolArgumentFragments: 1_024,
-  maxTotalToolArgumentFragments: 4_096,
   maxCompletedToolCalls: 32,
   maxCompletedToolArgumentBytes: 4 * 1024 * 1024
 }
@@ -51,6 +53,7 @@ export class ModelStreamResourceBudget {
   private outputBytes = 0
   private pendingArgumentBytes = 0
   private pendingArgumentFragments = 0
+  private pendingToolCalls = 0
   private completedToolCalls = 0
   private completedToolArgumentBytes = 0
 
@@ -59,14 +62,14 @@ export class ModelStreamResourceBudget {
   addInboundBytes(bytes: number): void {
     this.totalBytes += bytes
     if (this.totalBytes > this.limits.maxTotalBytes) {
-      throw this.limit(`${this.limits.maxTotalBytes} total response bytes`)
+      throw this.exceeded(`${this.limits.maxTotalBytes} total response bytes`)
     }
   }
 
   addFrame(bytes: number): void {
     this.frames += 1
-    if (this.frames > this.limits.maxFrames) throw this.limit(`${this.limits.maxFrames} SSE frames`)
-    if (bytes > this.limits.maxFrameBytes) throw this.limit(`${this.limits.maxFrameBytes} SSE frame bytes`)
+    if (this.frames > this.limits.maxFrames) throw this.exceeded(`${this.limits.maxFrames} SSE frames`)
+    if (bytes > this.limits.maxFrameBytes) throw this.exceeded(`${this.limits.maxFrameBytes} SSE frame bytes`)
   }
 
   pendingCall(
@@ -80,19 +83,23 @@ export class ModelStreamResourceBudget {
       return existing
     }
     if (pending.size >= this.limits.maxPendingToolCalls) {
-      throw this.limit(`${this.limits.maxPendingToolCalls} pending tool calls`)
+      throw this.exceeded(`${this.limits.maxPendingToolCalls} pending tool calls`)
     }
     const created: PendingToolCall = {
       ...(index !== undefined ? { index } : {}),
-      argumentParts: [], argumentBytes: 0, argumentFragments: 0
+      argumentBlocks: [],
+      argumentParts: [],
+      argumentBytes: 0,
+      argumentFragments: 0
     }
     pending.set(callId, created)
+    this.pendingToolCalls += 1
     return created
   }
 
   bindPendingIndex(pendingByIndex: Map<number, string>, index: number, callId: string): void {
     if (!pendingByIndex.has(index) && pendingByIndex.size >= this.limits.maxPendingToolCalls) {
-      throw this.limit(`${this.limits.maxPendingToolCalls} pending tool-call indexes`)
+      throw this.exceeded(`${this.limits.maxPendingToolCalls} pending tool-call indexes`)
     }
     pendingByIndex.set(index, callId)
   }
@@ -100,12 +107,17 @@ export class ModelStreamResourceBudget {
   appendArguments(pending: PendingToolCall, value: string): void {
     if (!value) return
     const bytes = Buffer.byteLength(value, 'utf8')
-    this.assertPendingCapacity(pending, bytes, 1)
+    this.assertPendingCapacity(pending, bytes)
     pending.argumentParts.push(value)
     pending.argumentBytes += bytes
     pending.argumentFragments += 1
     this.pendingArgumentBytes += bytes
     this.pendingArgumentFragments += 1
+    if (pending.argumentParts.length >= TOOL_ARGUMENT_PART_COMPACTION_WINDOW) {
+      const blocks = pending.argumentBlocks ?? (pending.argumentBlocks = [])
+      blocks.push(pending.argumentParts.join(''))
+      pending.argumentParts = []
+    }
   }
 
   replaceArguments(pending: PendingToolCall, value: string): void {
@@ -114,31 +126,31 @@ export class ModelStreamResourceBudget {
     this.assertPendingCapacity(
       pending,
       bytes - pending.argumentBytes,
-      fragments - pending.argumentFragments,
       bytes,
       fragments
     )
     this.pendingArgumentBytes += bytes - pending.argumentBytes
     this.pendingArgumentFragments += fragments - pending.argumentFragments
+    pending.argumentBlocks = []
     pending.argumentParts = value ? [value] : []
     pending.argumentBytes = bytes
     pending.argumentFragments = fragments
   }
 
   pendingArguments(pending: PendingToolCall): string {
-    return pending.argumentParts.join('')
+    return [...(pending.argumentBlocks ?? []), ...pending.argumentParts].join('')
   }
 
   completeToolCall(argumentsRaw: string): void {
     const bytes = Buffer.byteLength(argumentsRaw, 'utf8')
     if (bytes > this.limits.maxPendingToolArgumentBytes) {
-      throw this.limit(`${this.limits.maxPendingToolArgumentBytes} bytes for one tool argument`)
+      throw this.exceeded(`${this.limits.maxPendingToolArgumentBytes} bytes for one tool argument`)
     }
     if (this.completedToolCalls + 1 > this.limits.maxCompletedToolCalls) {
-      throw this.limit(`${this.limits.maxCompletedToolCalls} completed tool calls`)
+      throw this.exceeded(`${this.limits.maxCompletedToolCalls} completed tool calls`)
     }
     if (this.completedToolArgumentBytes + bytes > this.limits.maxCompletedToolArgumentBytes) {
-      throw this.limit(`${this.limits.maxCompletedToolArgumentBytes} completed tool-argument bytes`)
+      throw this.exceeded(`${this.limits.maxCompletedToolArgumentBytes} completed tool-argument bytes`)
     }
     this.completedToolCalls += 1
     this.completedToolArgumentBytes += bytes
@@ -151,6 +163,7 @@ export class ModelStreamResourceBudget {
     const value = pending.get(callId)
     if (!value) return undefined
     pending.delete(callId)
+    this.pendingToolCalls = Math.max(0, this.pendingToolCalls - 1)
     this.pendingArgumentBytes -= value.argumentBytes
     this.pendingArgumentFragments -= value.argumentFragments
     return value
@@ -168,7 +181,7 @@ export class ModelStreamResourceBudget {
       }
     }
     if (this.outputBytes + bytes > this.limits.maxOutputBytes) {
-      throw this.limit(`${this.limits.maxOutputBytes} response text and reasoning bytes`)
+      throw this.exceeded(`${this.limits.maxOutputBytes} response text and reasoning bytes`)
     }
     this.outputBytes += bytes
   }
@@ -176,27 +189,65 @@ export class ModelStreamResourceBudget {
   private assertPendingCapacity(
     pending: PendingToolCall,
     byteDelta: number,
-    fragmentDelta: number,
     replacementBytes?: number,
     replacementFragments?: number
   ): void {
     const nextBytes = replacementBytes ?? pending.argumentBytes + byteDelta
-    const nextFragments = replacementFragments ?? pending.argumentFragments + fragmentDelta
+    const nextFragments = replacementFragments ?? pending.argumentFragments + 1
     if (nextBytes > this.limits.maxPendingToolArgumentBytes) {
-      throw this.limit(`${this.limits.maxPendingToolArgumentBytes} bytes for one tool argument`)
+      throw this.exceeded(`${this.limits.maxPendingToolArgumentBytes} bytes for one tool argument`, pending, {
+        nextArgumentBytes: nextBytes,
+        nextArgumentFragments: nextFragments
+      })
     }
     if (this.pendingArgumentBytes + byteDelta > this.limits.maxTotalPendingToolArgumentBytes) {
-      throw this.limit(`${this.limits.maxTotalPendingToolArgumentBytes} total pending tool-argument bytes`)
-    }
-    if (nextFragments > this.limits.maxToolArgumentFragments) {
-      throw this.limit(`${this.limits.maxToolArgumentFragments} fragments for one tool argument`)
-    }
-    if (this.pendingArgumentFragments + fragmentDelta > this.limits.maxTotalToolArgumentFragments) {
-      throw this.limit(`${this.limits.maxTotalToolArgumentFragments} total tool-argument fragments`)
+      throw this.exceeded(`${this.limits.maxTotalPendingToolArgumentBytes} total pending tool-argument bytes`, pending, {
+        nextArgumentBytes: nextBytes,
+        nextArgumentFragments: nextFragments
+      })
     }
   }
 
-  private limit(detail: string): ModelStreamResourceLimitError {
-    return new ModelStreamResourceLimitError(`model stream exceeded ${detail}`)
+  exceeded(
+    detail: string,
+    pending?: PendingToolCall,
+    next?: { nextArgumentBytes: number; nextArgumentFragments: number }
+  ): ModelStreamResourceLimitError {
+    const argumentBytes = next?.nextArgumentBytes ?? pending?.argumentBytes ?? 0
+    const argumentFragments = next?.nextArgumentFragments ?? pending?.argumentFragments ?? 0
+    const pendingArgumentBytes = this.pendingArgumentBytes + (pending ? argumentBytes - pending.argumentBytes : 0)
+    const pendingArgumentFragments = this.pendingArgumentFragments +
+      (pending ? argumentFragments - pending.argumentFragments : 0)
+    const toolContext = pending
+      ? `, tool=${safeToolNameForDiagnostic(pending.name)}, argumentBytes=${argumentBytes}, fragments=${argumentFragments}`
+      : ''
+    return new ModelStreamResourceLimitError(
+      `model stream exceeded ${detail} (responseBytes=${this.totalBytes}, frames=${this.frames}, pendingToolCalls=${this.pendingToolCalls}, pendingArgumentBytes=${pendingArgumentBytes}, pendingArgumentFragments=${pendingArgumentFragments}${toolContext})`
+    )
   }
+}
+
+function safeToolNameForDiagnostic(value: string | undefined): string {
+  if (!value) return 'unknown'
+  let retained = ''
+  let count = 0
+  for (const character of value) {
+    if (count >= TOOL_DIAGNOSTIC_NAME_MAX_CODE_POINTS) {
+      retained += '…'
+      break
+    }
+    const codePoint = character.codePointAt(0) ?? 0
+    const unsafe =
+      codePoint <= 0x1f ||
+      (codePoint >= 0x7f && codePoint <= 0x9f) ||
+      codePoint === 0x2028 ||
+      codePoint === 0x2029 ||
+      character === ',' ||
+      character === '=' ||
+      character === '(' ||
+      character === ')'
+    retained += unsafe ? '_' : character
+    count += 1
+  }
+  return retained || 'unknown'
 }

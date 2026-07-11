@@ -21,6 +21,7 @@ import {
 } from './design-svg-validation.js'
 import type { SvgDiagnostic } from './design-svg-validation.js'
 import type { ToolHostContext } from '../../ports/tool-host.js'
+import { validateStructuredArgumentBudget } from './structured-argument-budget.js'
 
 export const DESIGN_SVG_INSPECT_TOOL_NAME = 'design_svg_inspect'
 export const DESIGN_SVG_EDIT_TOOL_NAME = 'design_svg_edit'
@@ -38,7 +39,11 @@ export type DesignSvgMutationToolOptions = {
   beforeCommit?: (path: string) => Promise<void>
 }
 
-const MAX_BATCH_OPS = 200
+export const DESIGN_SVG_EDIT_MAX_BATCH_OPS = 50
+export const DESIGN_SVG_EDIT_MAX_ELEMENTS = MAX_SVG_ELEMENTS
+export const DESIGN_SVG_EDIT_MAX_ELEMENT_DEPTH = 32
+const DESIGN_SVG_EDIT_MAX_ARGUMENT_BYTES = 1 * 1024 * 1024
+const DESIGN_SVG_EDIT_MAX_STRUCTURED_NODES = 20_000
 const MAX_HANDLE_DEPTH = 64
 // Keep inspect results below LocalToolHost's large-output offload threshold so
 // structural handles remain directly available to the model. Larger documents
@@ -272,10 +277,17 @@ function specFrom(
   depth = 0,
   state: { count: number } = { count: 0 }
 ): SvgElementSpec {
-  if (depth > 32) throw new Error('SVG element nesting exceeds 32 levels')
+  if (depth >= DESIGN_SVG_EDIT_MAX_ELEMENT_DEPTH) {
+    throw new Error(`SVG element nesting exceeds ${DESIGN_SVG_EDIT_MAX_ELEMENT_DEPTH} levels`)
+  }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid SVG element spec')
   state.count += 1
-  if (state.count > MAX_SVG_ELEMENTS) throw new Error(`one add operation cannot create more than ${MAX_SVG_ELEMENTS} elements`)
+  if (state.count > DESIGN_SVG_EDIT_MAX_ELEMENTS) {
+    throw new Error(
+      `SVG edit batch cannot add more than ${DESIGN_SVG_EDIT_MAX_ELEMENTS} elements; ` +
+      'split the additions into smaller calls, then run design_svg_inspect again and use its new revision/handles'
+    )
+  }
   const record = value as Record<string, unknown>
   if (typeof record.tag !== 'string') throw new Error('SVG element spec requires tag')
   if (record.id !== undefined && typeof record.id !== 'string') throw new Error('SVG element id must be a string')
@@ -705,7 +717,7 @@ export function createDesignSvgInspectTool(): LocalTool {
 export function createDesignSvgEditTool(options: DesignSvgMutationToolOptions = {}): LocalTool {
   return LocalToolHost.defineTool({
     name: DESIGN_SVG_EDIT_TOOL_NAME,
-    description: 'Atomically set document geometry or add, update, delete, reparent, and reorder SVG elements in the active SVG artifact. Use stable element ids and batch related edits.',
+    description: 'Atomically set document geometry or add, update, delete, reparent, and reorder SVG elements in the active SVG artifact. Use stable element ids, prefer revision-safe batches of 20-50 related operations, and after each batch run design_svg_inspect again before using new revision-bound handles.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -714,7 +726,7 @@ export function createDesignSvgEditTool(options: DesignSvgMutationToolOptions = 
           description: 'Revision returned by design_svg_inspect. Required whenever an op uses handle or parentHandle; recommended for every edit to prevent lost updates.'
         },
         ops: {
-          type: 'array', minItems: 1, maxItems: MAX_BATCH_OPS,
+          type: 'array', minItems: 1, maxItems: DESIGN_SVG_EDIT_MAX_BATCH_OPS,
           items: {
             type: 'object',
             properties: {
@@ -769,6 +781,8 @@ export function createDesignSvgEditTool(options: DesignSvgMutationToolOptions = 
     shouldAdvertise: advertised,
     execute: async (args, context) => withToolBoundary(async () => {
       try {
+        const complexityError = svgEditComplexityError(args)
+        if (complexityError) throw new Error(complexityError)
         const file = await svgFileContext(context, true)
         return await withFileMutationQueue(file.absolutePath, async () => {
           if (context.abortSignal.aborted) throw new Error('SVG edit aborted before start')
@@ -776,7 +790,9 @@ export function createDesignSvgEditTool(options: DesignSvgMutationToolOptions = 
           if (current.errors.length) throw new Error(`cannot edit invalid SVG: ${current.errors[0]}`)
           const expected = expectedRevision(args.expectedRevision)
           const ops = Array.isArray(args.ops) ? args.ops : []
-          if (ops.length === 0 || ops.length > MAX_BATCH_OPS) throw new Error(`ops must contain 1-${MAX_BATCH_OPS} operations`)
+          if (ops.length === 0 || ops.length > DESIGN_SVG_EDIT_MAX_BATCH_OPS) {
+            throw new Error(`ops must contain 1-${DESIGN_SVG_EDIT_MAX_BATCH_OPS} operations; split larger edits into revision-safe batches of 20-50`)
+          }
           const operationRecords: Record<string, unknown>[] = []
           let usesStructuralHandle = false
           for (const value of ops) {
@@ -808,6 +824,24 @@ export function createDesignSvgEditTool(options: DesignSvgMutationToolOptions = 
       }
     })
   })
+}
+
+function svgEditComplexityError(args: Record<string, unknown>): string | null {
+  const budget = validateStructuredArgumentBudget(args, {
+    label: DESIGN_SVG_EDIT_TOOL_NAME,
+    maxBytes: DESIGN_SVG_EDIT_MAX_ARGUMENT_BYTES,
+    maxNodes: DESIGN_SVG_EDIT_MAX_STRUCTURED_NODES,
+    // `specFrom` applies the authoritative 32-level SVG element-tree limit.
+    // This generic ceiling only protects unrelated argument object nesting.
+    maxDepth: 128
+  })
+  if (!budget.ok) return budget.error
+
+  const ops = Array.isArray(args.ops) ? args.ops : []
+  if (ops.length > DESIGN_SVG_EDIT_MAX_BATCH_OPS) {
+    return `design_svg_edit accepts at most ${DESIGN_SVG_EDIT_MAX_BATCH_OPS} operations; split larger edits into revision-safe batches of 20-50`
+  }
+  return null
 }
 
 export function createDesignSvgAnimateTool(options: DesignSvgMutationToolOptions = {}): LocalTool {

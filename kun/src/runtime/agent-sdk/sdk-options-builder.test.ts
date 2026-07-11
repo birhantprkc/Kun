@@ -163,4 +163,10 @@ describe('assembleSdkOptions', () => {
     expect(withExtras.model).toBe('claude-opus-4-8')
     expect(withExtras.resume).toBe('sess_1')
   })
+
+  test('maps the native model-step ceiling to a finite SDK maxTurns option', () => {
+    expect(assembleSdkOptions({ ...base, maxTurns: 7 }).maxTurns).toBe(7)
+    expect(assembleSdkOptions({ ...base, maxTurns: 2.9 }).maxTurns).toBe(2)
+    expect(assembleSdkOptions(base).maxTurns).toBeUndefined()
+  })
 })

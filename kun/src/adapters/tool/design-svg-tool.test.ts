@@ -8,7 +8,10 @@ import {
   createDesignSvgAnimateTool,
   createDesignSvgEditTool,
   createDesignSvgInspectTool,
-  createDesignSvgValidateTool
+  createDesignSvgValidateTool,
+  DESIGN_SVG_EDIT_MAX_BATCH_OPS,
+  DESIGN_SVG_EDIT_MAX_ELEMENT_DEPTH,
+  DESIGN_SVG_EDIT_MAX_ELEMENTS
 } from './design-svg-tool.js'
 import type { ToolHostContext } from '../../ports/tool-host.js'
 
@@ -152,8 +155,11 @@ describe('design SVG tools', () => {
   })
 
   it('supports default artwork parenting and ids created earlier in the same batch', async () => {
+    const tool = createDesignSvgEditTool()
+    expect(tool.description).toContain('20-50')
+    expect(JSON.stringify(tool.inputSchema)).toContain(`"maxItems":${DESIGN_SVG_EDIT_MAX_BATCH_OPS}`)
     const workspace = await workspaceWithSvg()
-    const edit = await createDesignSvgEditTool().execute({
+    const edit = await tool.execute({
       ops: [
         { op: 'add', element: { tag: 'g', id: 'new-group' } },
         {
@@ -166,6 +172,26 @@ describe('design SVG tools', () => {
     expect(edit.isError).toBeUndefined()
     const source = await readFile(join(workspace, relativePath), 'utf8')
     expect(source).toContain('<g id="artwork"><g id="new-group"><rect id="new-rect"')
+  })
+
+  it('rejects oversized SVG edit batches before mutation', async () => {
+    const workspace = await workspaceWithSvg()
+    const absolutePath = join(workspace, relativePath)
+    const before = await readFile(absolutePath, 'utf8')
+    const tool = createDesignSvgEditTool()
+
+    const oversized = await tool.execute({
+      ops: Array.from({ length: DESIGN_SVG_EDIT_MAX_BATCH_OPS + 1 }, (_, index) => ({
+        op: 'add', element: { tag: 'rect', id: `rect-${index}` }
+      }))
+    }, context(workspace))
+    expect(oversized.isError).toBe(true)
+    expect(oversized.output).toMatchObject({
+      ok: false,
+      error: expect.stringContaining(`at most ${DESIGN_SVG_EDIT_MAX_BATCH_OPS} operations`)
+    })
+
+    expect(await readFile(absolutePath, 'utf8')).toBe(before)
   })
 
   it('rejects unsafe elements and external resources without mutating the artifact', async () => {
@@ -396,11 +422,21 @@ describe('design SVG tools', () => {
   it('bounds nested and oversized add specs before constructing the DOM tree', async () => {
     const workspace = await workspaceWithSvg()
     const absolutePath = join(workspace, relativePath)
-    const before = await readFile(absolutePath, 'utf8')
-    let nested: Record<string, unknown> = { tag: 'rect', attributes: { width: 1, height: 1 } }
-    for (let index = 0; index < 34; index += 1) nested = { tag: 'g', children: [nested] }
+    const nestedSpec = (levels: number): Record<string, unknown> => {
+      let value: Record<string, unknown> = { tag: 'rect', attributes: { width: 1, height: 1 } }
+      for (let index = 1; index < levels; index += 1) {
+        value = { tag: 'g', children: [value] }
+      }
+      return value
+    }
+    const atLimit = await createDesignSvgEditTool().execute({
+      ops: [{ op: 'add', parentId: 'artwork', element: nestedSpec(DESIGN_SVG_EDIT_MAX_ELEMENT_DEPTH) }]
+    }, context(workspace))
+    expect(atLimit.isError).toBeUndefined()
+    const afterAccepted = await readFile(absolutePath, 'utf8')
+
     const tooDeep = await createDesignSvgEditTool().execute({
-      ops: [{ op: 'add', parentId: 'artwork', element: nested }]
+      ops: [{ op: 'add', parentId: 'artwork', element: nestedSpec(DESIGN_SVG_EDIT_MAX_ELEMENT_DEPTH + 1) }]
     }, context(workspace))
     const tooMany = await createDesignSvgEditTool().execute({
       ops: [{
@@ -408,15 +444,16 @@ describe('design SVG tools', () => {
         parentId: 'artwork',
         element: {
           tag: 'g',
-          children: Array.from({ length: 5_000 }, () => ({ tag: 'rect', attributes: { width: 1, height: 1 } }))
+          children: Array.from({ length: DESIGN_SVG_EDIT_MAX_ELEMENTS }, () => ({ tag: 'rect', attributes: { width: 1, height: 1 } }))
         }
       }]
     }, context(workspace))
     expect(tooDeep.isError).toBe(true)
-    expect(JSON.stringify(tooDeep.output)).toContain('32 levels')
+    expect(JSON.stringify(tooDeep.output)).toContain(`${DESIGN_SVG_EDIT_MAX_ELEMENT_DEPTH} levels`)
     expect(tooMany.isError).toBe(true)
-    expect(JSON.stringify(tooMany.output)).toContain('more than 5000 elements')
-    expect(await readFile(absolutePath, 'utf8')).toBe(before)
+    expect(JSON.stringify(tooMany.output)).toContain(`more than ${DESIGN_SVG_EDIT_MAX_ELEMENTS} elements`)
+    expect(JSON.stringify(tooMany.output)).toContain('design_svg_inspect again')
+    expect(await readFile(absolutePath, 'utf8')).toBe(afterAccepted)
   })
 
   it('does not overwrite an external edit that lands between read and commit', async () => {

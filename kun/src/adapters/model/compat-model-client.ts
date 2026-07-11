@@ -46,6 +46,7 @@ import { decodeChatCompletionsStreamPayload } from './chat-completions-stream-de
 import { decodeResponsesStreamPayload } from './responses-stream-decoder.js'
 import { decodeAnthropicMessagesStreamPayload } from './anthropic-messages-stream-decoder.js'
 import { decodeCompatNonStreamingResponse } from './compat-non-streaming-decoder.js'
+import { IncrementalSseFrameBuffer } from './incremental-sse-frame-buffer.js'
 
 export { redactUrlForLog } from './compat-http-diagnostics.js'
 
@@ -89,6 +90,11 @@ export type CompatModelClientConfig = {
 
 type ChatMessage = CompatChatMessage
 type ModelStopReason = Extract<ModelStreamChunk, { kind: 'completed' }>['stopReason']
+
+function mergeStreamFinishReason(current: string | null, next: string): string {
+  if (current && current !== 'stop' && next === 'stop') return current
+  return next
+}
 
 type ChatCompletionResponse = {
   id: string
@@ -179,39 +185,11 @@ export class CompatModelClient implements ModelClient {
     })
     try {
       for await (const chunk of this.streamInner(request, round)) {
-        this.captureChunk(round, chunk)
+        sink.captureChunk(round, chunk)
         yield chunk
       }
     } finally {
       sink.finish(round)
-    }
-  }
-
-  private captureChunk(round: LlmDebugRound, chunk: ModelStreamChunk): void {
-    const out = round.output
-    switch (chunk.kind) {
-      case 'assistant_text_delta':
-        out.text += chunk.text
-        break
-      case 'assistant_reasoning_delta':
-        out.reasoning += chunk.text
-        break
-      case 'tool_call_complete':
-        out.toolCalls.push({
-          callId: chunk.callId,
-          toolName: chunk.toolName,
-          arguments: chunk.arguments
-        })
-        break
-      case 'usage':
-        out.usage = chunk.usage
-        break
-      case 'completed':
-        out.stopReason = chunk.stopReason
-        break
-      case 'error':
-        out.error = chunk.message
-        break
     }
   }
 
@@ -240,8 +218,7 @@ export class CompatModelClient implements ModelClient {
     const stream = request.stream ?? !this.config.nonStreaming
     const body = this.buildRequestBody(request, stream, { endpointFormat })
     if (round) {
-      round.requestBody = body
-      round.url = redactUrlForLog(url)
+      this.config.debugSink?.captureRequest(round, body, redactUrlForLog(url))
     }
     const headers = this.buildHeaders(
       stream,
@@ -292,7 +269,7 @@ export class CompatModelClient implements ModelClient {
       const text = errorBody.text
       if (usesChatCompletionsShape(endpointFormat) && shouldRetryWithoutStreamUsage(response.status, text, body)) {
         const retryBody = this.buildRequestBody(request, stream, { endpointFormat, includeStreamUsage: false })
-        if (round) round.requestBody = retryBody
+        if (round) this.config.debugSink?.captureRequest(round, retryBody, redactUrlForLog(url))
         const retry = await this.postChatCompletion(url, headers, retryBody, request.abortSignal)
         if (retry.kind === 'error') {
           yield { kind: 'error', message: retry.message }
@@ -578,7 +555,7 @@ export class CompatModelClient implements ModelClient {
   ): AsyncIterable<ModelStreamChunk> {
     const decoder = new TextDecoder('utf-8')
     const reader = body.getReader()
-    let buffer = ''
+    const frameBuffer = new IncrementalSseFrameBuffer()
     const pendingArguments = new Map<string, PendingToolCall>()
     const pendingByIndex = new Map<number, string>()
     const completedToolCalls = new Set<string>()
@@ -630,16 +607,14 @@ export class CompatModelClient implements ModelClient {
         budget.addInboundBytes(value.byteLength)
         bufferBytes += value.byteLength
         if (bufferBytes > limits.maxBufferBytes) {
-          throw new ModelStreamResourceLimitError(
-            `model stream exceeded ${limits.maxBufferBytes} buffered SSE bytes`
-          )
+          throw budget.exceeded(`${limits.maxBufferBytes} buffered SSE bytes`)
         }
-        buffer += decoder.decode(value, { stream: true })
-        let boundary: RegExpExecArray | null
-        while ((boundary = /\r?\n\r?\n/.exec(buffer)) !== null) {
-          const frame = buffer.slice(0, boundary.index)
-          buffer = buffer.slice(boundary.index + boundary[0].length)
-          const consumedBytes = Buffer.byteLength(frame, 'utf8') + Buffer.byteLength(boundary[0], 'utf8')
+        frameBuffer.append(decoder.decode(value, { stream: true }))
+        while (true) {
+          const parsedFrame = frameBuffer.takeFrame()
+          if (parsedFrame === null) break
+          const frame = parsedFrame.data
+          const consumedBytes = Buffer.byteLength(frame, 'utf8') + Buffer.byteLength(parsedFrame.delimiter, 'utf8')
           bufferBytes = Math.max(0, bufferBytes - consumedBytes)
           budget.addFrame(Buffer.byteLength(frame, 'utf8'))
           const dataLines = frame
@@ -673,14 +648,19 @@ export class CompatModelClient implements ModelClient {
           budget.addOutput(result.chunks)
           sawTextDelta = result.sawTextDelta
           if (result.usage) usage = mergeUsageSnapshots(usage, result.usage)
-          if (result.finishReason) finishReason = result.finishReason
+          if (result.finishReason) {
+            // Some protocols emit a semantic terminal reason followed by a
+            // generic stop frame. Do not let that trailing frame downgrade
+            // `length`, `tool_calls`, or `error` to a successful stop.
+            finishReason = mergeStreamFinishReason(finishReason, result.finishReason)
+          }
           for (const chunk of result.chunks) yield chunk
         }
         if (sawDone) break
       }
     } catch (error) {
       if (error instanceof ModelStreamResourceLimitError) {
-        buffer = ''
+        frameBuffer.clear()
         budget.clearPendingCalls(pendingArguments)
         pendingByIndex.clear()
         completedToolCalls.clear()
@@ -750,9 +730,9 @@ export class CompatModelClient implements ModelClient {
         case 'error':
           return 'error'
         default:
-          // A recovered tool call means this was really a tool-call turn the
-          // provider mislabeled (e.g. finish_reason 'stop' or bare `[DONE]`).
-          return flushedPendingToolCall ? 'tool_calls' : 'stop'
+          // A completed or recovered tool call means this was really a
+          // tool-call turn even if the provider emitted only a generic stop.
+          return flushedPendingToolCall || completedToolCalls.size > 0 ? 'tool_calls' : 'stop'
       }
     })()
     yield { kind: 'completed', stopReason }
@@ -1057,14 +1037,6 @@ function normalizeModelStreamLimits(input: Partial<ModelStreamLimits> | undefine
     maxTotalPendingToolArgumentBytes: normalize(
       input?.maxTotalPendingToolArgumentBytes,
       DEFAULT_MODEL_STREAM_LIMITS.maxTotalPendingToolArgumentBytes
-    ),
-    maxToolArgumentFragments: normalize(
-      input?.maxToolArgumentFragments,
-      DEFAULT_MODEL_STREAM_LIMITS.maxToolArgumentFragments
-    ),
-    maxTotalToolArgumentFragments: normalize(
-      input?.maxTotalToolArgumentFragments,
-      DEFAULT_MODEL_STREAM_LIMITS.maxTotalToolArgumentFragments
     ),
     maxCompletedToolCalls: normalize(input?.maxCompletedToolCalls, DEFAULT_MODEL_STREAM_LIMITS.maxCompletedToolCalls),
     maxCompletedToolArgumentBytes: normalize(

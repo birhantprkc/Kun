@@ -149,6 +149,28 @@ describe('createAgentSdkRuntime handlesProvider', () => {
     expect(r.handlesProvider('claude-subscription')).toBe(true)
     expect(r.handlesProvider('deepseek')).toBe(false) // an explicit HTTP provider stays HTTP
   })
+
+  test('forwards every native turn limit to delegated SDK turns', () => {
+    const turnLimits = { maxSteps: 9, maxWallTimeMs: 12_345, maxToolCallsPerStep: 4 }
+    const runtime = createAgentSdkRuntime({
+      registry: {} as never,
+      turns: {} as never,
+      sessionStore: {} as never,
+      threadStore: {} as never,
+      events: {} as never,
+      ids: { next: (prefix) => prefix },
+      prefix: { systemPrompt: '' },
+      providerConfigs: {},
+      agentSdkProviderIds: new Set(),
+      defaultApprovalPolicy: 'auto',
+      turnLimits
+    })
+    const deps = (runtime as unknown as {
+      deps: { getTurnLimits?(): typeof turnLimits | undefined }
+    }).deps
+
+    expect(deps.getTurnLimits?.()).toEqual(turnLimits)
+  })
 })
 
 describe('createAgentSdkRuntime turn context', () => {

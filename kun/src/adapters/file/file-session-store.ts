@@ -28,7 +28,10 @@ const SLOW_LOAD_ITEMS_LOG_MS = 1_000
 const ITEMS_CACHE_MAX_THREADS = 4
 const HIGHEST_SEQ_CACHE_MAX_THREADS = 256
 const ITEM_HISTORY_REVISION_MAX_THREADS = 512
-export const DEFAULT_EVENT_REPLAY_MAX_RECORD_BYTES = 1 * 1024 * 1024
+// A model tool argument may contain 1 MiB of raw JSON. Invalid JSON is kept in
+// a `__raw` string for safe tool failure, whose escaping can nearly double the
+// persisted item event. Keep replay finite while allowing that valid envelope.
+export const DEFAULT_EVENT_REPLAY_MAX_RECORD_BYTES = 4 * 1024 * 1024
 
 /**
  * File-backed session store. Appends events and items to per-thread
