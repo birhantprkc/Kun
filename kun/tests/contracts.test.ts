@@ -424,6 +424,50 @@ describe('cli', () => {
     })
   })
 
+  it('treats empty trace-specific OTLP variables as unset and falls back to common values', () => {
+    const parsed = parseServeOptions(['--data-dir=/srv/ca'], {
+      OTEL_TRACES_EXPORTER: 'otlp',
+      OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: ' ',
+      OTEL_EXPORTER_OTLP_PROTOCOL: 'http/json',
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: '',
+      OTEL_EXPORTER_OTLP_ENDPOINT: 'https://collector.example/otel',
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: '   ',
+      OTEL_EXPORTER_OTLP_HEADERS: 'api-key=common',
+      OTEL_EXPORTER_OTLP_TRACES_TIMEOUT: '',
+      OTEL_EXPORTER_OTLP_TIMEOUT: '3000'
+    })
+
+    expect(parsed.observability).toEqual({
+      enabled: true,
+      exporter: 'otlp-http-json',
+      endpoint: 'https://collector.example/otel/v1/traces',
+      headers: { 'api-key': 'common' },
+      timeoutMs: 3000,
+      includeSensitiveContent: false
+    })
+  })
+
+  it('rejects non-HTTP observability endpoints', () => {
+    const base = parseServeOptions(['--data-dir=/srv/ca'])
+
+    expect(() => validateServeOptions({
+      ...base,
+      observability: {
+        enabled: true,
+        exporter: 'otlp-http-json',
+        endpoint: 'file:///tmp/traces'
+      }
+    })).toThrow()
+    expect(validateServeOptions({
+      ...base,
+      observability: {
+        enabled: true,
+        exporter: 'otlp-http-json',
+        endpoint: 'https://collector.example/v1/traces'
+      }
+    }).observability?.endpoint).toBe('https://collector.example/v1/traces')
+  })
+
   it('applies CLI and standard OTLP environment precedence over config', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kun-observability-config-'))
     try {

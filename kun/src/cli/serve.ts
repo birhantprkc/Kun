@@ -58,7 +58,8 @@ export function parseServeOptions(
     stringFlag(raw, 'observabilityOutput') ??
     env.KUN_OBSERVABILITY_OUTPUT_PATH ??
     configServe.observability?.outputPath
-  const otlpProtocol = env.OTEL_EXPORTER_OTLP_TRACES_PROTOCOL ?? env.OTEL_EXPORTER_OTLP_PROTOCOL
+  const otlpProtocol = nonEmptyEnv(env.OTEL_EXPORTER_OTLP_TRACES_PROTOCOL) ??
+    nonEmptyEnv(env.OTEL_EXPORTER_OTLP_PROTOCOL)
   const standardOtlpEnabled = env.OTEL_TRACES_EXPORTER
     ?.split(',')
     .map((entry) => entry.trim())
@@ -74,17 +75,23 @@ export function parseServeOptions(
     | 'jsonl'
     | 'otlp-http-json'
     | undefined
+  const otlpTracesEndpoint = nonEmptyEnv(env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)
+  const otlpCommonEndpoint = nonEmptyEnv(env.OTEL_EXPORTER_OTLP_ENDPOINT)
   const observabilityEndpoint =
-    env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ??
-    (env.OTEL_EXPORTER_OTLP_ENDPOINT
-      ? resolveOtlpTracesEndpoint({ commonEndpoint: env.OTEL_EXPORTER_OTLP_ENDPOINT })
+    otlpTracesEndpoint ??
+    (otlpCommonEndpoint
+      ? resolveOtlpTracesEndpoint({ commonEndpoint: otlpCommonEndpoint })
       : undefined) ??
     configServe.observability?.endpoint
+  const otlpHeaders = nonEmptyEnv(env.OTEL_EXPORTER_OTLP_TRACES_HEADERS) ??
+    nonEmptyEnv(env.OTEL_EXPORTER_OTLP_HEADERS)
   const observabilityHeaders = parseOtlpHeaders(
-    env.OTEL_EXPORTER_OTLP_TRACES_HEADERS ?? env.OTEL_EXPORTER_OTLP_HEADERS
+    otlpHeaders
   ) ?? configServe.observability?.headers
+  const otlpTimeout = nonEmptyEnv(env.OTEL_EXPORTER_OTLP_TRACES_TIMEOUT) ??
+    nonEmptyEnv(env.OTEL_EXPORTER_OTLP_TIMEOUT)
   const observabilityTimeoutMs = numberEnv(
-    env.OTEL_EXPORTER_OTLP_TRACES_TIMEOUT ?? env.OTEL_EXPORTER_OTLP_TIMEOUT
+    otlpTimeout
   ) ?? configServe.observability?.timeoutMs
   const merged: ServeOptions = {
     ...DEFAULT_SERVE_OPTIONS,
@@ -208,6 +215,11 @@ function numberEnv(value: string | undefined): number | undefined {
   if (!value?.trim()) return undefined
   const parsed = Number(value)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+}
+
+function nonEmptyEnv(value: string | undefined): string | undefined {
+  const trimmed = value?.trim()
+  return trimmed || undefined
 }
 
 /**

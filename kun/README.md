@@ -92,9 +92,14 @@ npm run benchmark:replay -- --suite benchmarks/agent-core.json \
 }
 ```
 
-Reports must use the same suite, task iterations, repeat count, concurrency, and tag. Model changes are rejected
+Reports must use the same suite, task iterations, repeat count, concurrency, thread-retention mode, and tag. Model changes are rejected
 unless the policy sets `allowModelChange` to `true`. Each run records its effective task/suite/runtime model, so
-mixed-model suites resolve and evaluate thresholds separately for every current model.
+mixed-model suites resolve and evaluate thresholds separately for every current model. New reports also include a
+stable hash of normalized prompts, expectations, timeouts, provider/reasoning selections, and non-model suite defaults; regenerate
+legacy baselines that do not contain this hash before comparing them with a new report.
+
+Peak RSS is a process-lifetime metric, so its regression thresholds are evaluated once from policy `defaults` for
+the whole suite. It is intentionally not attributed to individual models in a mixed-model run.
 
 Replay threads always use the `read-only` sandbox and disable interactive input. Reports include success rate,
 TTFT, full latency, tool time, SSE delivery delay, token/cache/cost counters, and Kun process peak RSS. The runtime

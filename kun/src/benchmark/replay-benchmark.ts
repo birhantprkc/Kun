@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
 import { z } from 'zod'
 import { RuntimeEvent, type RuntimeEvent as RuntimeEventValue } from '../contracts/events.js'
@@ -164,28 +165,58 @@ export type ReplayModelComparison = {
   promptTokensDelta: number
   cacheHitRateDelta: number | null
   costUsdDelta: number
+  regressions: string[]
+}
+
+type ReplaySummaryComparison = {
+  successRateDelta: number
+  ttftP95MsDelta: number | null
+  totalP95MsDelta: number | null
+  promptTokensDelta: number
+  cacheHitRateDelta: number | null
+  costUsdDelta: number
   peakRssBytesDelta: number | null
   regressions: string[]
 }
 
-const ReplayComparisonThresholdsSchema = z.object({
-  maxSuccessRateDrop: z.number().min(0).max(1).default(0),
-  maxTtftRelativeIncrease: z.number().nonnegative().default(0.2),
-  maxTtftAbsoluteIncreaseMs: z.number().nonnegative().default(300),
-  maxTotalRelativeIncrease: z.number().nonnegative().default(0.2),
-  maxTotalAbsoluteIncreaseMs: z.number().nonnegative().default(500),
-  maxCacheHitRateDrop: z.number().min(0).max(1).default(0.05),
-  maxCostRelativeIncrease: z.number().nonnegative().default(0.1),
+const ReplayComparisonThresholdFieldSchemas = {
+  maxSuccessRateDrop: z.number().min(0).max(1),
+  maxTtftRelativeIncrease: z.number().nonnegative(),
+  maxTtftAbsoluteIncreaseMs: z.number().nonnegative(),
+  maxTotalRelativeIncrease: z.number().nonnegative(),
+  maxTotalAbsoluteIncreaseMs: z.number().nonnegative(),
+  maxCacheHitRateDrop: z.number().min(0).max(1),
+  maxCostRelativeIncrease: z.number().nonnegative(),
   maxCostAbsoluteIncreaseUsd: z.number().nonnegative().optional(),
   maxPromptTokensRelativeIncrease: z.number().nonnegative().optional(),
   maxPromptTokensAbsoluteIncrease: z.number().int().nonnegative().optional(),
   maxPeakRssRelativeIncrease: z.number().nonnegative().optional(),
   maxPeakRssAbsoluteIncreaseBytes: z.number().int().nonnegative().optional()
+}
+
+const ReplayComparisonThresholdsSchema = z.object({
+  ...ReplayComparisonThresholdFieldSchemas,
+  maxSuccessRateDrop: ReplayComparisonThresholdFieldSchemas.maxSuccessRateDrop.default(0),
+  maxTtftRelativeIncrease: ReplayComparisonThresholdFieldSchemas.maxTtftRelativeIncrease.default(0.2),
+  maxTtftAbsoluteIncreaseMs: ReplayComparisonThresholdFieldSchemas.maxTtftAbsoluteIncreaseMs.default(300),
+  maxTotalRelativeIncrease: ReplayComparisonThresholdFieldSchemas.maxTotalRelativeIncrease.default(0.2),
+  maxTotalAbsoluteIncreaseMs: ReplayComparisonThresholdFieldSchemas.maxTotalAbsoluteIncreaseMs.default(500),
+  maxCacheHitRateDrop: ReplayComparisonThresholdFieldSchemas.maxCacheHitRateDrop.default(0.05),
+  maxCostRelativeIncrease: ReplayComparisonThresholdFieldSchemas.maxCostRelativeIncrease.default(0.1)
 }).strict()
+
+const ReplayComparisonThresholdOverridesSchema = z
+  .object(ReplayComparisonThresholdFieldSchemas)
+  .omit({
+    maxPeakRssRelativeIncrease: true,
+    maxPeakRssAbsoluteIncreaseBytes: true
+  })
+  .partial()
+  .strict()
 
 export const ReplayComparisonPolicySchema = z.object({
   defaults: ReplayComparisonThresholdsSchema.default(() => ReplayComparisonThresholdsSchema.parse({})),
-  models: z.record(z.string().min(1), ReplayComparisonThresholdsSchema.partial()).default({}),
+  models: z.record(z.string().min(1), ReplayComparisonThresholdOverridesSchema).default({}),
   allowModelChange: z.boolean().default(false)
 }).strict()
 
@@ -224,7 +255,15 @@ export type ReplayBudgetEvaluation = {
 export type ReplayReport = {
   version: 1
   generatedAt: string
-  suite: { name: string; taskCount: number; repeat: number; concurrency?: number; tag?: string }
+  suite: {
+    name: string
+    taskCount: number
+    repeat: number
+    concurrency?: number
+    keepThreads?: boolean
+    definitionHash?: string
+    tag?: string
+  }
   runtime: {
     baseUrl: string
     model?: string
@@ -309,6 +348,8 @@ export async function runReplaySuite(
       taskCount: selectedTasks.length,
       repeat,
       concurrency,
+      keepThreads: options.keepThreads === true,
+      definitionHash: replaySuiteDefinitionHash(suite, selectedTasks),
       ...(options.tag ? { tag: options.tag } : {})
     },
     runtime: {
@@ -597,26 +638,38 @@ export function compareReplayReports(
       const metrics = compareReplaySummaries(
         groupedPairs.size === 1 ? current.summary : summarizeReplayRuns(group.currentRuns),
         groupedPairs.size === 1 ? baseline.summary : summarizeReplayRuns(group.baselineRuns),
-        policy
+        policy,
+        { includePeakRss: false }
       )
       return {
         ...(group.model ? { model: group.model } : {}),
         baselineModels: [...group.baselineModels].sort(),
         runCount: group.currentRuns.length,
         policy,
-        ...metrics
+        successRateDelta: metrics.successRateDelta,
+        ttftP95MsDelta: metrics.ttftP95MsDelta,
+        totalP95MsDelta: metrics.totalP95MsDelta,
+        promptTokensDelta: metrics.promptTokensDelta,
+        cacheHitRateDelta: metrics.cacheHitRateDelta,
+        costUsdDelta: metrics.costUsdDelta,
+        regressions: metrics.regressions
       }
     })
   const onlyModel = modelComparisons.length === 1 ? modelComparisons[0] : undefined
   const policy = onlyModel?.policy ?? ReplayComparisonThresholdsSchema.parse(configuredPolicy.defaults)
-  const metrics = compareReplaySummaries(current.summary, baseline.summary, policy)
-  const regressions = modelComparisons.flatMap((comparison) =>
+  const globalPolicy = ReplayComparisonThresholdsSchema.parse(configuredPolicy.defaults)
+  const metrics = compareReplaySummaries(current.summary, baseline.summary, globalPolicy)
+  const modelRegressions = modelComparisons.flatMap((comparison) =>
     comparison.regressions.map((regression) =>
       modelComparisons.length === 1
         ? regression
         : `[model ${comparison.model ?? 'unknown'}] ${regression}`
     )
   )
+  const regressions = [
+    ...modelRegressions,
+    ...metrics.regressions.filter((regression) => regression.startsWith('peak RSS'))
+  ]
   return {
     baselineGeneratedAt: baseline.generatedAt,
     ...(onlyModel?.model ? { model: onlyModel.model } : {}),
@@ -630,8 +683,9 @@ export function compareReplayReports(
 function compareReplaySummaries(
   current: ReplayReportSummary,
   baseline: ReplayReportSummary,
-  policy: ReplayComparisonThresholds
-): Omit<ReplayModelComparison, 'model' | 'baselineModels' | 'runCount' | 'policy'> {
+  policy: ReplayComparisonThresholds,
+  options: { includePeakRss?: boolean } = {}
+): ReplaySummaryComparison {
   const successRateDelta = current.successRate - baseline.successRate
   const ttftP95MsDelta = nullableDelta(current.ttftP95Ms, baseline.ttftP95Ms)
   const totalP95MsDelta = nullableDelta(current.totalP95Ms, baseline.totalP95Ms)
@@ -681,6 +735,7 @@ function compareReplaySummaries(
     regressions.push(`prompt tokens increased by ${current.promptTokens - baseline.promptTokens}`)
   }
   if (
+    options.includePeakRss !== false &&
     (policy.maxPeakRssRelativeIncrease !== undefined ||
       policy.maxPeakRssAbsoluteIncreaseBytes !== undefined) &&
     isIncreaseRegression(
@@ -716,7 +771,14 @@ function assertReplayReportsComparable(
   if (current.suite.taskCount !== baseline.suite.taskCount) mismatches.push('task count')
   if (current.suite.repeat !== baseline.suite.repeat) mismatches.push('repeat count')
   if ((current.suite.concurrency ?? 1) !== (baseline.suite.concurrency ?? 1)) mismatches.push('concurrency')
+  if ((current.suite.keepThreads ?? false) !== (baseline.suite.keepThreads ?? false)) mismatches.push('thread retention')
   if ((current.suite.tag ?? '') !== (baseline.suite.tag ?? '')) mismatches.push('tag filter')
+  if (
+    (current.suite.definitionHash || baseline.suite.definitionHash) &&
+    current.suite.definitionHash !== baseline.suite.definitionHash
+  ) {
+    mismatches.push('suite definition')
+  }
 
   const currentByKey = replayRunsByIdentity(current.runs)
   const baselineByKey = replayRunsByIdentity(baseline.runs)
@@ -793,6 +855,34 @@ function groupReplayRunPairsByCurrentModel(
     groups.set(key, group)
   }
   return groups
+}
+
+export function replaySuiteDefinitionHash(suite: ReplaySuite, tasks: ReplayTask[]): string {
+  const defaultsWithoutModel = { ...suite.defaults }
+  delete defaultsWithoutModel.model
+  const tasksWithoutModel = tasks.map((task) => {
+    const next = { ...task }
+    delete next.model
+    return next
+  })
+  return createHash('sha256')
+    .update(JSON.stringify(canonicalizeReplayDefinition({
+      version: suite.version,
+      defaults: defaultsWithoutModel,
+      tasks: tasksWithoutModel
+    })))
+    .digest('hex')
+}
+
+function canonicalizeReplayDefinition(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeReplayDefinition)
+  if (!value || typeof value !== 'object') return value
+  const output: Record<string, unknown> = {}
+  for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+    const child = (value as Record<string, unknown>)[key]
+    if (child !== undefined) output[key] = canonicalizeReplayDefinition(child)
+  }
+  return output
 }
 
 export function parseReplayBudget(input: unknown): ReplayBudget {
@@ -1231,7 +1321,7 @@ function isIncreaseRegression(
   const delta = current - baseline
   if (delta <= 0) return false
   if (minimumDelta !== undefined && delta <= minimumDelta) return false
-  if (baseline <= 0) return minimumDelta !== undefined
+  if (baseline <= 0) return ratio !== undefined || minimumDelta !== undefined
   return ratio === undefined || current > baseline * (1 + ratio)
 }
 

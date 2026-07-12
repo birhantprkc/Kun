@@ -9,8 +9,15 @@ const DEFAULT_TIMEOUT_MS = 10_000
 const DEFAULT_BATCH_SIZE = 64
 const DEFAULT_MAX_QUEUE_SIZE = 2_048
 const MAX_RETRY_DELAY_MS = 30_000
+const RETRYABLE_HTTP_STATUS_CODES = new Set([429, 502, 503, 504])
 
 class PermanentOtlpExportError extends Error {}
+
+class RetryableOtlpExportError extends Error {
+  constructor(message: string, readonly retryAfterMs?: number) {
+    super(message)
+  }
+}
 
 export type OtlpHttpJsonSinkOptions = {
   endpoint?: string
@@ -19,6 +26,7 @@ export type OtlpHttpJsonSinkOptions = {
   batchSize?: number
   maxQueueSize?: number
   fetch?: typeof globalThis.fetch
+  random?: () => number
 }
 
 /**
@@ -33,6 +41,7 @@ export class OtlpHttpJsonAgentObservabilitySink implements AgentObservabilitySin
   private readonly batchSize: number
   private readonly maxQueueSize: number
   private readonly fetchImpl: typeof globalThis.fetch
+  private readonly random: () => number
   private queue: AgentObservabilitySpan[] = []
   private scheduled = false
   private inFlight: Promise<void> | undefined
@@ -50,6 +59,7 @@ export class OtlpHttpJsonAgentObservabilitySink implements AgentObservabilitySin
     this.batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE
     this.maxQueueSize = options.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE
     this.fetchImpl = options.fetch ?? globalThis.fetch
+    this.random = options.random ?? Math.random
   }
 
   emit(span: AgentObservabilitySpan): void {
@@ -88,16 +98,16 @@ export class OtlpHttpJsonAgentObservabilitySink implements AgentObservabilitySin
       })
       .catch((error: unknown) => {
         if (error instanceof PermanentOtlpExportError) {
+          this.retryAttempt = 0
           console.warn(`[kun] OTLP trace export rejected; dropping batch: ${error.message}`)
           return
         }
         if (this.closed) {
-          const message = error instanceof Error ? error.message : String(error)
-          console.warn(`[kun] OTLP trace export failed during shutdown; dropping batch: ${message}`)
+          this.requeue(batch)
           return
         }
         this.requeue(batch)
-        const delayMs = Math.min(1_000 * 2 ** this.retryAttempt, MAX_RETRY_DELAY_MS)
+        const delayMs = this.retryDelayMs(error)
         this.retryAttempt += 1
         const message = error instanceof Error ? error.message : String(error)
         console.warn(`[kun] OTLP trace export failed; retrying in ${delayMs}ms: ${message}`)
@@ -138,6 +148,15 @@ export class OtlpHttpJsonAgentObservabilitySink implements AgentObservabilitySin
     this.queue = [...batch.slice(Math.max(0, batch.length - available)), ...this.queue]
   }
 
+  private retryDelayMs(error: unknown): number {
+    if (error instanceof RetryableOtlpExportError && error.retryAfterMs !== undefined) {
+      return Math.min(error.retryAfterMs, MAX_RETRY_DELAY_MS)
+    }
+    const exponentialMs = Math.min(1_000 * 2 ** this.retryAttempt, MAX_RETRY_DELAY_MS)
+    const jitteredMs = exponentialMs * (0.5 + this.random())
+    return Math.max(1, Math.min(Math.round(jitteredMs), MAX_RETRY_DELAY_MS))
+  }
+
   private async drainAndClose(): Promise<void> {
     this.closed = true
     const deadline = Date.now() + this.timeoutMs
@@ -166,29 +185,51 @@ export class OtlpHttpJsonAgentObservabilitySink implements AgentObservabilitySin
 
   private async exportBatch(batch: AgentObservabilitySpan[], timeoutMs = this.timeoutMs): Promise<void> {
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), Math.max(1, timeoutMs))
-    timeout.unref?.()
+    const effectiveTimeoutMs = Math.max(1, timeoutMs)
+    let timeout: ReturnType<typeof setTimeout> | undefined
     try {
-      const response = await this.fetchImpl(this.endpoint, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...this.headers
-        },
-        body: JSON.stringify(toExportTraceServiceRequest(batch)),
-        signal: controller.signal
-      })
+      const response = await Promise.race([
+        this.fetchImpl(this.endpoint, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...this.headers
+          },
+          body: JSON.stringify(toExportTraceServiceRequest(batch)),
+          signal: controller.signal
+        }),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            controller.abort()
+            reject(new Error(`collector request timed out after ${effectiveTimeoutMs}ms`))
+          }, effectiveTimeoutMs)
+          timeout.unref?.()
+        })
+      ])
       if (!response.ok) {
         const message = `collector returned HTTP ${response.status}`
-        if (response.status !== 408 && response.status !== 429 && response.status < 500) {
-          throw new PermanentOtlpExportError(message)
+        if (RETRYABLE_HTTP_STATUS_CODES.has(response.status)) {
+          throw new RetryableOtlpExportError(
+            message,
+            parseRetryAfterMs(response.headers.get('retry-after'))
+          )
         }
-        throw new Error(message)
+        throw new PermanentOtlpExportError(message)
       }
     } finally {
-      clearTimeout(timeout)
+      if (timeout) clearTimeout(timeout)
     }
   }
+}
+
+function parseRetryAfterMs(value: string | null): number | undefined {
+  const trimmed = value?.trim()
+  if (!trimmed) return undefined
+  const seconds = Number(trimmed)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1_000)
+  const dateMs = Date.parse(trimmed)
+  if (!Number.isFinite(dateMs)) return undefined
+  return Math.max(0, dateMs - Date.now())
 }
 
 export function resolveOtlpTracesEndpoint(input: {

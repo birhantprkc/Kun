@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AgentObservabilitySpan } from './agent-observability.js'
 import {
   OtlpHttpJsonAgentObservabilitySink,
@@ -7,6 +7,10 @@ import {
 } from './otlp-http-json-sink.js'
 
 describe('OtlpHttpJsonAgentObservabilitySink', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('exports valid OTLP JSON without adding content fields', async () => {
     const calls: Array<Parameters<typeof globalThis.fetch>> = []
     const fetch: typeof globalThis.fetch = vi.fn(async (input, init) => {
@@ -67,6 +71,84 @@ describe('OtlpHttpJsonAgentObservabilitySink', () => {
     await sink.flush()
 
     expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it.each([500, 501])('does not retry non-retryable OTLP HTTP %s responses', async (status) => {
+    const fetch: typeof globalThis.fetch = vi.fn(async () => new Response(null, { status }))
+    const sink = new OtlpHttpJsonAgentObservabilitySink({ fetch })
+
+    sink.emit(span())
+    await sink.flush()
+    await sink.flush()
+
+    expect(fetch).toHaveBeenCalledOnce()
+    await sink.shutdown()
+  })
+
+  it('retries HTTP 503 after the collector Retry-After delay', async () => {
+    vi.useFakeTimers()
+    const fetch: typeof globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(null, {
+        status: 503,
+        headers: { 'retry-after': '2' }
+      }))
+      .mockResolvedValueOnce(new Response(null, { status: 200 }))
+    const sink = new OtlpHttpJsonAgentObservabilitySink({ fetch, random: () => 0 })
+
+    sink.emit(span())
+    await sink.flush()
+    expect(fetch).toHaveBeenCalledOnce()
+
+    await vi.advanceTimersByTimeAsync(1_999)
+    expect(fetch).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetch).toHaveBeenCalledTimes(2)
+
+    await sink.shutdown()
+  })
+
+  it('honors the hard timeout when fetch ignores AbortSignal', async () => {
+    vi.useFakeTimers()
+    let signal: AbortSignal | null | undefined
+    const fetch: typeof globalThis.fetch = vi.fn((_input, init) => {
+      signal = init?.signal
+      return new Promise<Response>(() => undefined)
+    })
+    const sink = new OtlpHttpJsonAgentObservabilitySink({ timeoutMs: 25, fetch })
+
+    sink.emit(span())
+    const shutdown = sink.shutdown()
+    await vi.advanceTimersByTimeAsync(25)
+
+    await expect(shutdown).resolves.toBeUndefined()
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(signal?.aborted).toBe(true)
+  })
+
+  it('retries an in-flight transient batch while shutdown drains', async () => {
+    let resolveFirst!: (response: Response) => void
+    const firstResponse = new Promise<Response>((resolve) => {
+      resolveFirst = resolve
+    })
+    let requestCount = 0
+    const fetch: typeof globalThis.fetch = vi.fn(async () => {
+      requestCount += 1
+      return requestCount === 1
+        ? await firstResponse
+        : new Response(null, { status: 200 })
+    })
+    const sink = new OtlpHttpJsonAgentObservabilitySink({ timeoutMs: 1_000, fetch })
+
+    sink.emit(span())
+    await Promise.resolve()
+    expect(fetch).toHaveBeenCalledOnce()
+
+    const shutdown = sink.shutdown()
+    expect(sink.shutdown()).toBe(shutdown)
+    resolveFirst(new Response(null, { status: 503 }))
+
+    await expect(shutdown).resolves.toBeUndefined()
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 
   it('drains every queued batch during shutdown', async () => {

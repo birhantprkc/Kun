@@ -32,6 +32,14 @@ export const DEFAULT_KUN_MODEL = 'deepseek-v4-pro'
 
 const PositiveInt = z.number().int().positive()
 const PositiveRatio = z.number().positive().max(1)
+const HttpUrl = z.string().url().refine((value) => {
+  try {
+    const protocol = new URL(value).protocol
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
+  }
+}, { message: 'URL must use http or https' })
 
 export const DEFAULT_MODEL_REQUEST_RETRY_CONFIG = {
   maxAttempts: 0,
@@ -256,7 +264,7 @@ export const ObservabilityConfigSchema = z
     enabled: z.boolean().default(false).optional(),
     outputPath: z.string().min(1).optional(),
     exporter: z.enum(['jsonl', 'otlp-http-json']).optional(),
-    endpoint: z.string().url().optional(),
+    endpoint: HttpUrl.optional(),
     headers: z.record(z.string(), z.string()).optional(),
     timeoutMs: z.number().int().min(1).max(300_000).optional(),
     batchSize: z.number().int().min(1).max(512).optional(),
