@@ -1,4 +1,8 @@
-import type { WorkspaceFileReadResult, WorkspaceFileTarget } from '@shared/workspace-file'
+import type {
+  WorkspaceFileReadResult,
+  WorkspaceFileTarget,
+  WorkspaceImageReadResult
+} from '@shared/workspace-file'
 import {
   Check,
   ChevronRight,
@@ -36,7 +40,10 @@ import {
   languageFromFilePath,
   renderFallbackCodeHtml
 } from '../lib/code-highlighting'
-import { isWorkspaceTextPreviewPath } from '../lib/workspace-text-preview'
+import {
+  isWorkspaceRasterImagePreviewPath,
+  isWorkspaceTextPreviewPath
+} from '../lib/workspace-text-preview'
 import {
   initialWriteMarkdownImageSrc,
   loadWriteMarkdownImage
@@ -196,6 +203,7 @@ export function WorkspaceFilePreviewPanel({
 }: Props): ReactElement {
   const { t } = useTranslation('common')
   const [result, setResult] = useState<WorkspaceFileReadResult | null>(null)
+  const [imageResult, setImageResult] = useState<WorkspaceImageReadResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [copied, setCopied] = useState(false)
   const [markdownRendered, setMarkdownRendered] = useState(true)
@@ -208,6 +216,7 @@ export function WorkspaceFilePreviewPanel({
   useEffect(() => {
     if (!target) {
       setResult(null)
+      setImageResult(null)
       setLoading(false)
       return
     }
@@ -216,6 +225,35 @@ export function WorkspaceFilePreviewPanel({
     setSvgRendered(true)
     setLoading(true)
     setResult(null)
+    setImageResult(null)
+
+    const readTarget = {
+      ...target,
+      workspaceRoot: target.workspaceRoot ?? workspaceRoot
+    }
+
+    if (isWorkspaceRasterImagePreviewPath(target.path)) {
+      void window.kunGui
+        .readWorkspaceImage(readTarget)
+        .then((next) => {
+          if (!cancelled) setImageResult(next)
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setImageResult({
+              ok: false,
+              message: error instanceof Error ? error.message : String(error)
+            })
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false)
+        })
+
+      return () => {
+        cancelled = true
+      }
+    }
 
     if (!isWorkspaceTextPreviewPath(target.path)) {
       setResult({
@@ -227,10 +265,7 @@ export function WorkspaceFilePreviewPanel({
     }
 
     void window.kunGui
-      .readWorkspaceFile({
-        ...target,
-        workspaceRoot: target.workspaceRoot ?? workspaceRoot
-      })
+      .readWorkspaceFile(readTarget)
       .then((next) => {
         if (!cancelled) setResult(next)
       })
@@ -278,9 +313,10 @@ export function WorkspaceFilePreviewPanel({
 
   const displayPath = useMemo(() => {
     const root = target?.workspaceRoot ?? workspaceRoot
+    if (imageResult?.ok) return formatFilePathForDisplay(imageResult.path, root) ?? fileNameFromPath(imageResult.path)
     if (result?.ok) return formatFilePathForDisplay(result.path, root) ?? fileNameFromPath(result.path)
     return target?.path ? formatFilePathForDisplay(target.path, root) ?? fileNameFromPath(target.path) : ''
-  }, [result, target, workspaceRoot])
+  }, [imageResult, result, target, workspaceRoot])
   const language = useMemo(() => {
     if (result?.ok) return languageFromFilePath(result.path)
     return target?.path ? languageFromFilePath(target.path) : ''
@@ -544,9 +580,9 @@ export function WorkspaceFilePreviewPanel({
             <span className="truncate text-ds-muted">{t('filePreviewEmpty')}</span>
           )}
         </div>
-        {result?.ok ? (
+        {result?.ok || imageResult?.ok ? (
           <span className="shrink-0 font-mono text-[10px] text-ds-faint">
-            {formatBytes(result.size)}
+            {formatBytes(result?.ok ? result.size : imageResult?.ok ? imageResult.size : 0)}
             {language ? ` · ${language}` : ''}
           </span>
         ) : null}
@@ -566,6 +602,14 @@ export function WorkspaceFilePreviewPanel({
           <div className="flex flex-1 items-center justify-center gap-2 text-[12px] text-ds-muted">
             <Loader2 className="h-4 w-4 animate-spin" strokeWidth={1.8} />
             {t('filePreviewLoading')}
+          </div>
+        ) : imageResult?.ok ? (
+          <div className="ds-file-preview-image min-h-0 flex-1 overflow-auto p-5">
+            <img
+              src={imageResult.dataUrl}
+              alt={currentFileName}
+              className="block h-full min-h-[120px] w-full object-contain"
+            />
           </div>
         ) : result?.ok ? (
           <div className="relative flex min-h-0 flex-1 flex-col">
@@ -652,7 +696,7 @@ export function WorkspaceFilePreviewPanel({
           </div>
         ) : (
           <div className="flex flex-1 items-center justify-center px-6 text-center text-[12px] leading-6 text-red-700 dark:text-red-300">
-            {result?.message ?? t('filePreviewFailed')}
+            {imageResult?.message ?? result?.message ?? t('filePreviewFailed')}
           </div>
         )}
       </div>
