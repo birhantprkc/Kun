@@ -197,6 +197,41 @@ describe('replay benchmark', () => {
     ]))
   })
 
+  it('applies comparison policies to each effective model in a mixed-model suite', () => {
+    const baselineFast = replayRun('passed', 100, 1_000, 0.8)
+    Object.assign(baselineFast, { id: 'fast#1', taskId: 'fast', model: 'fast-model' })
+    const baselineAccurate = replayRun('passed', 100, 1_000, 0.8)
+    Object.assign(baselineAccurate, { id: 'accurate#1', taskId: 'accurate', model: 'accurate-model' })
+    const currentFast = replayRun('passed', 450, 1_900, 0.8)
+    Object.assign(currentFast, { id: 'fast#1', taskId: 'fast', model: 'fast-model' })
+    const currentAccurate = replayRun('passed', 500, 2_000, 0.8)
+    Object.assign(currentAccurate, { id: 'accurate#1', taskId: 'accurate', model: 'accurate-model' })
+
+    const baseline = report([baselineFast, baselineAccurate], '2026-06-28T00:00:00.000Z')
+    const current = report([currentFast, currentAccurate], '2026-06-29T00:00:00.000Z')
+    const comparison = compareReplayReports(current, baseline, {
+      models: {
+        'fast-model': {
+          maxTtftRelativeIncrease: 5,
+          maxTotalRelativeIncrease: 5
+        }
+      }
+    })
+
+    expect(comparison.model).toBeUndefined()
+    expect(comparison.modelComparisons.map((entry) => entry.model)).toEqual([
+      'accurate-model',
+      'fast-model'
+    ])
+    expect(comparison.regressions).toEqual(expect.arrayContaining([
+      expect.stringContaining('[model accurate-model] TTFT'),
+      expect.stringContaining('[model accurate-model] total latency')
+    ]))
+    expect(comparison.regressions).not.toEqual(expect.arrayContaining([
+      expect.stringContaining('[model fast-model]')
+    ]))
+  })
+
   it('supports explicit token and memory regression thresholds', () => {
     const baseline = report([replayRun('passed', 100, 1_000, 0.8)], '2026-06-28T00:00:00.000Z')
     const current = report([replayRun('passed', 100, 1_000, 0.8)], '2026-06-29T00:00:00.000Z')
@@ -210,6 +245,27 @@ describe('replay benchmark', () => {
         maxPromptTokensRelativeIncrease: 0.1,
         maxPromptTokensAbsoluteIncrease: 100,
         maxPeakRssRelativeIncrease: 0.1,
+        maxPeakRssAbsoluteIncreaseBytes: 10_000
+      }
+    })
+
+    expect(comparison.regressions).toEqual(expect.arrayContaining([
+      expect.stringContaining('prompt tokens'),
+      expect.stringContaining('peak RSS')
+    ]))
+  })
+
+  it('enforces absolute token and memory thresholds when the baseline is zero', () => {
+    const baseline = report([replayRun('passed', 100, 1_000, 0.8)], '2026-06-28T00:00:00.000Z')
+    const current = report([replayRun('passed', 100, 1_000, 0.8)], '2026-06-29T00:00:00.000Z')
+    baseline.summary.promptTokens = 0
+    current.summary.promptTokens = 150
+    baseline.summary.peakRssBytes = 0
+    current.summary.peakRssBytes = 20_000
+
+    const comparison = compareReplayReports(current, baseline, {
+      defaults: {
+        maxPromptTokensAbsoluteIncrease: 100,
         maxPeakRssAbsoluteIncreaseBytes: 10_000
       }
     })
@@ -235,6 +291,15 @@ describe('replay benchmark', () => {
     expect(() => compareReplayReports(current, baseline, {
       allowModelChange: true
     })).toThrow('task count')
+  })
+
+  it('rejects comparisons recorded with different concurrency', () => {
+    const baseline = report([replayRun('passed', 100, 1_000, 0.8)], '2026-06-28T00:00:00.000Z')
+    const current = report([replayRun('passed', 100, 1_000, 0.8)], '2026-06-29T00:00:00.000Z')
+    baseline.suite.concurrency = 1
+    current.suite.concurrency = 2
+
+    expect(() => compareReplayReports(current, baseline)).toThrow('concurrency')
   })
 
   it('evaluates explicit replay budget gates', () => {

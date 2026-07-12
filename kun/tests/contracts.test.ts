@@ -424,6 +424,44 @@ describe('cli', () => {
     })
   })
 
+  it('applies CLI and standard OTLP environment precedence over config', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kun-observability-config-'))
+    try {
+      const configPath = join(dir, 'kun.config.json')
+      await writeFile(configPath, JSON.stringify({
+        serve: {
+          dataDir: join(dir, 'data'),
+          observability: {
+            enabled: false,
+            exporter: 'jsonl',
+            endpoint: 'https://config.example/v1/traces'
+          }
+        }
+      }))
+      const env = {
+        OTEL_TRACES_EXPORTER: 'otlp',
+        OTEL_EXPORTER_OTLP_PROTOCOL: 'http/json',
+        OTEL_EXPORTER_OTLP_ENDPOINT: 'https://env.example/otel'
+      }
+
+      const standard = parseServeOptions(['--config', configPath], env)
+      expect(standard.observability).toMatchObject({
+        enabled: true,
+        exporter: 'otlp-http-json',
+        endpoint: 'https://env.example/otel/v1/traces'
+      })
+
+      const cli = parseServeOptions([
+        '--config', configPath,
+        '--observability',
+        '--observability-exporter=jsonl'
+      ], env)
+      expect(cli.observability).toMatchObject({ enabled: true, exporter: 'jsonl' })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it('loads serve and context compaction settings from an explicit config file', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kun-config-'))
     try {

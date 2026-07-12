@@ -39,6 +39,9 @@ export class OtlpHttpJsonAgentObservabilitySink implements AgentObservabilitySin
   private retryAttempt = 0
   private retryTimer: ReturnType<typeof setTimeout> | undefined
   private warnedAboutOverflow = false
+  private warnedAfterShutdown = false
+  private closed = false
+  private shutdownPromise: Promise<void> | undefined
 
   constructor(options: OtlpHttpJsonSinkOptions = {}) {
     this.endpoint = options.endpoint ?? DEFAULT_OTLP_ENDPOINT
@@ -50,6 +53,13 @@ export class OtlpHttpJsonAgentObservabilitySink implements AgentObservabilitySin
   }
 
   emit(span: AgentObservabilitySpan): void {
+    if (this.closed) {
+      if (!this.warnedAfterShutdown) {
+        this.warnedAfterShutdown = true
+        console.warn('[kun] OTLP trace exporter is closed; dropping late spans')
+      }
+      return
+    }
     if (this.queue.length >= this.maxQueueSize) {
       this.queue.shift()
       if (!this.warnedAboutOverflow) {
@@ -62,6 +72,7 @@ export class OtlpHttpJsonAgentObservabilitySink implements AgentObservabilitySin
   }
 
   async flush(): Promise<void> {
+    if (this.closed) return this.shutdownPromise ?? this.inFlight
     if (this.inFlight) return this.inFlight
     if (this.retryTimer) {
       clearTimeout(this.retryTimer)
@@ -78,6 +89,11 @@ export class OtlpHttpJsonAgentObservabilitySink implements AgentObservabilitySin
       .catch((error: unknown) => {
         if (error instanceof PermanentOtlpExportError) {
           console.warn(`[kun] OTLP trace export rejected; dropping batch: ${error.message}`)
+          return
+        }
+        if (this.closed) {
+          const message = error instanceof Error ? error.message : String(error)
+          console.warn(`[kun] OTLP trace export failed during shutdown; dropping batch: ${message}`)
           return
         }
         this.requeue(batch)
@@ -98,8 +114,18 @@ export class OtlpHttpJsonAgentObservabilitySink implements AgentObservabilitySin
     return this.inFlight
   }
 
+  /**
+   * Stop accepting spans and drain every queued batch within one exporter
+   * timeout window. Shutdown never leaves retry timers behind and never makes
+   * process exit wait through an unbounded retry sequence.
+   */
+  shutdown(): Promise<void> {
+    this.shutdownPromise ??= this.drainAndClose()
+    return this.shutdownPromise
+  }
+
   private scheduleFlush(): void {
-    if (this.scheduled || this.inFlight || this.retryTimer) return
+    if (this.closed || this.scheduled || this.inFlight || this.retryTimer) return
     this.scheduled = true
     queueMicrotask(() => {
       this.scheduled = false
@@ -112,9 +138,35 @@ export class OtlpHttpJsonAgentObservabilitySink implements AgentObservabilitySin
     this.queue = [...batch.slice(Math.max(0, batch.length - available)), ...this.queue]
   }
 
-  private async exportBatch(batch: AgentObservabilitySpan[]): Promise<void> {
+  private async drainAndClose(): Promise<void> {
+    this.closed = true
+    const deadline = Date.now() + this.timeoutMs
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer)
+      this.retryTimer = undefined
+    }
+    if (this.inFlight) await this.inFlight
+
+    while (this.queue.length > 0) {
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0) {
+        console.warn(`[kun] OTLP trace shutdown timed out; dropping ${this.queue.length} queued span(s)`)
+        this.queue = []
+        return
+      }
+      const batch = this.queue.splice(0, this.batchSize)
+      try {
+        await this.exportBatch(batch, remainingMs)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.warn(`[kun] OTLP trace export failed during shutdown; dropping batch: ${message}`)
+      }
+    }
+  }
+
+  private async exportBatch(batch: AgentObservabilitySpan[], timeoutMs = this.timeoutMs): Promise<void> {
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs)
+    const timeout = setTimeout(() => controller.abort(), Math.max(1, timeoutMs))
     timeout.unref?.()
     try {
       const response = await this.fetchImpl(this.endpoint, {

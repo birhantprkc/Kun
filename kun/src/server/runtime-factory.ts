@@ -1486,7 +1486,11 @@ export async function createKunServeRuntime(
         shutdownAllLspSessions()
         await mcpProviders.close()
       } finally {
-        await stores.shutdown?.()
+        try {
+          await agentObservability?.shutdown()
+        } finally {
+          await stores.shutdown?.()
+        }
       }
     }
   }

@@ -1,7 +1,7 @@
 import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RuntimeEvent } from '../contracts/events.js'
 import {
   AgentObservabilityRecorder,
@@ -22,6 +22,15 @@ describe('AgentObservabilityRecorder', () => {
 
   afterEach(async () => {
     await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })))
+  })
+
+  it('shuts down its exporter so queued spans can flush before process exit', async () => {
+    const shutdown = vi.fn(async () => undefined)
+    const recorder = new AgentObservabilityRecorder({ emit: () => undefined, shutdown })
+
+    await recorder.shutdown()
+
+    expect(shutdown).toHaveBeenCalledOnce()
   })
 
   it('writes observability JSONL with private filesystem permissions', async () => {

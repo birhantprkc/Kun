@@ -68,6 +68,18 @@ describe('OtlpHttpJsonAgentObservabilitySink', () => {
 
     expect(fetch).toHaveBeenCalledOnce()
   })
+
+  it('drains every queued batch during shutdown', async () => {
+    const fetch: typeof globalThis.fetch = vi.fn(async () => new Response(null, { status: 200 }))
+    const sink = new OtlpHttpJsonAgentObservabilitySink({ batchSize: 1, fetch })
+
+    sink.emit(span())
+    sink.emit({ ...span(), spanId: '3'.repeat(16) })
+    sink.emit({ ...span(), spanId: '4'.repeat(16) })
+    await sink.shutdown()
+
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
 })
 
 function span(): AgentObservabilitySpan {

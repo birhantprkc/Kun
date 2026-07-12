@@ -33,6 +33,7 @@ export type AgentObservabilitySpan = {
 
 export type AgentObservabilitySink = {
   emit(span: AgentObservabilitySpan): Promise<void> | void
+  shutdown?(): Promise<void> | void
 }
 
 type PendingSpan = {
@@ -133,6 +134,11 @@ export class AgentObservabilityRecorder implements RuntimeEventObserver {
     for (const key of [...this.tools.keys()]) {
       if (key.startsWith(threadId + ':')) this.tools.delete(key)
     }
+  }
+
+  /** Flush queued exporters after active turns have been settled. */
+  async shutdown(): Promise<void> {
+    await this.sink.shutdown?.()
   }
 
   private startTurn(event: RuntimeEvent): void {

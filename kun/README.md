@@ -92,8 +92,9 @@ npm run benchmark:replay -- --suite benchmarks/agent-core.json \
 }
 ```
 
-Reports must use the same suite, task count, repeat count, and tag. Model changes are rejected unless the policy
-sets `allowModelChange` to `true`; per-model thresholds are resolved against the current report model.
+Reports must use the same suite, task iterations, repeat count, concurrency, and tag. Model changes are rejected
+unless the policy sets `allowModelChange` to `true`. Each run records its effective task/suite/runtime model, so
+mixed-model suites resolve and evaluate thresholds separately for every current model.
 
 Replay threads always use the `read-only` sandbox and disable interactive input. Reports include success rate,
 TTFT, full latency, tool time, SSE delivery delay, token/cache/cost counters, and Kun process peak RSS. The runtime
@@ -508,7 +509,8 @@ stay local to one thread, leave it as a pinned constraint.
 Sanitized agent spans can stay in the default local JSONL file or be
 exported to an OpenTelemetry collector with OTLP/HTTP JSON. The OTLP
 exporter is opt-in, bounded, batched, and runs outside the runtime event
-persistence path. Set the standard variables below before starting Kun:
+persistence path. Runtime shutdown drains queued batches within the configured
+export timeout and leaves no background retry timer behind. Set the standard variables below before starting Kun:
 
 ```sh
 OTEL_TRACES_EXPORTER=otlp

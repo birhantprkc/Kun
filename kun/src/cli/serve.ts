@@ -50,34 +50,36 @@ export function parseServeOptions(
     configServe.tokenEconomy?.enabled ??
     configServe.tokenEconomyMode ??
     DEFAULT_SERVE_OPTIONS.tokenEconomyMode
-  const observabilityEnabled =
+  const explicitObservabilityEnabled =
     booleanFlag(raw, 'observability') ??
-    envBoolean(env.KUN_OBSERVABILITY) ??
-    configServe.observability?.enabled
+    envBoolean(env.KUN_OBSERVABILITY)
   const observabilityOutputPath =
     stringFlag(raw, 'observability-output') ??
     stringFlag(raw, 'observabilityOutput') ??
     env.KUN_OBSERVABILITY_OUTPUT_PATH ??
     configServe.observability?.outputPath
-  const observabilityExporterValue =
-    stringFlag(raw, 'observability-exporter') ??
-    env.KUN_OBSERVABILITY_EXPORTER ??
-    configServe.observability?.exporter
-  const observabilityExporter = observabilityExporterValue as
-    | 'jsonl'
-    | 'otlp-http-json'
-    | undefined
   const otlpProtocol = env.OTEL_EXPORTER_OTLP_TRACES_PROTOCOL ?? env.OTEL_EXPORTER_OTLP_PROTOCOL
   const standardOtlpEnabled = env.OTEL_TRACES_EXPORTER
     ?.split(',')
     .map((entry) => entry.trim())
     .includes('otlp') && otlpProtocol === 'http/json'
-  const resolvedObservabilityExporter = observabilityExporter ?? (standardOtlpEnabled ? 'otlp-http-json' : undefined)
+  const observabilityEnabled = explicitObservabilityEnabled ??
+    (standardOtlpEnabled ? true : configServe.observability?.enabled)
+  const observabilityExporterValue =
+    stringFlag(raw, 'observability-exporter') ??
+    env.KUN_OBSERVABILITY_EXPORTER ??
+    (standardOtlpEnabled ? 'otlp-http-json' : undefined) ??
+    configServe.observability?.exporter
+  const observabilityExporter = observabilityExporterValue as
+    | 'jsonl'
+    | 'otlp-http-json'
+    | undefined
   const observabilityEndpoint =
     env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ??
-    (standardOtlpEnabled
+    (env.OTEL_EXPORTER_OTLP_ENDPOINT
       ? resolveOtlpTracesEndpoint({ commonEndpoint: env.OTEL_EXPORTER_OTLP_ENDPOINT })
-      : configServe.observability?.endpoint)
+      : undefined) ??
+    configServe.observability?.endpoint
   const observabilityHeaders = parseOtlpHeaders(
     env.OTEL_EXPORTER_OTLP_TRACES_HEADERS ?? env.OTEL_EXPORTER_OTLP_HEADERS
   ) ?? configServe.observability?.headers
@@ -178,12 +180,12 @@ export function parseServeOptions(
         : {})
     },
     observability:
-      observabilityEnabled !== undefined || observabilityOutputPath || resolvedObservabilityExporter
+      observabilityEnabled !== undefined || observabilityOutputPath || observabilityExporter
         ? {
             ...(configServe.observability ?? {}),
-            enabled: observabilityEnabled ?? Boolean(standardOtlpEnabled),
+            enabled: observabilityEnabled ?? false,
             ...(observabilityOutputPath ? { outputPath: observabilityOutputPath } : {}),
-            ...(resolvedObservabilityExporter ? { exporter: resolvedObservabilityExporter } : {}),
+            ...(observabilityExporter ? { exporter: observabilityExporter } : {}),
             ...(observabilityEndpoint ? { endpoint: observabilityEndpoint } : {}),
             ...(observabilityHeaders ? { headers: observabilityHeaders } : {}),
             ...(observabilityTimeoutMs ? { timeoutMs: observabilityTimeoutMs } : {})
