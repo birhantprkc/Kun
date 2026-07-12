@@ -47,7 +47,7 @@ describe('thread path isolation', () => {
       await expect(stat(victim)).resolves.toBeTruthy()
       await expect(store.get('../victim')).resolves.toBeNull()
     } finally {
-      store.close()
+      await store.shutdown()
     }
   })
 })
