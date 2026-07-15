@@ -83,6 +83,7 @@ import type { ModelClient } from '../ports/model-client.js'
 import type { SessionStore } from '../ports/session-store.js'
 import type { ThreadStore } from '../ports/thread-store.js'
 import type { ToolHostContext } from '../ports/tool-host.js'
+import { ScopedMigrationMaintenanceLock } from '../ports/migration-maintenance-lock.js'
 import { KUN_SYSTEM_PROMPT } from '../prompt/kun-system-prompt.js'
 import { RuntimeEventRecorder } from '../services/runtime-event-recorder.js'
 import {
@@ -148,6 +149,8 @@ import { ExtensionViewSessionService } from '../services/extension-view-session-
 import { ExtensionViewHostGenerationTracker } from '../extensions/view-host-generation-tracker.js'
 import { ExtensionSecretRevealConsentService } from '../services/extension-secret-reveal-consent.js'
 import { ExtensionConfigurationService } from '../services/extension-configuration-service.js'
+import { RuntimeMigrationService } from '../services/runtime-migration-service.js'
+import { RuntimeMigrationImportService } from '../services/runtime-migration-import-service.js'
 
 export type KunServeRuntimeOptions = {
   host: string
@@ -385,6 +388,7 @@ export async function createKunServeRuntime(
     seedUsageCarryover({ threadStore, sessionStore, usageService })
   ])
   const instructionRuntime = new InstructionRuntime(activeOptions.capabilities?.instructions)
+  const migrationMaintenance = new ScopedMigrationMaintenanceLock()
   const turnService = new TurnService({
     threadStore,
     sessionStore,
@@ -399,6 +403,7 @@ export async function createKunServeRuntime(
     contextCompaction: options.contextCompaction,
     maxConcurrentTurns: activeOptions.runtime?.turnLimits?.maxConcurrentTurns,
     lifecycleFence,
+    migrationMaintenance,
     ids,
     nowIso
   })
@@ -465,6 +470,27 @@ export async function createKunServeRuntime(
 	        nowIso
 	      })
 	    : undefined
+	  const migrationService = new RuntimeMigrationService({
+	    rootDir: join(activeOptions.dataDir, 'migrations', 'exports'),
+	    threads: threadService,
+	    turns: turnService,
+	    sessions: sessionStore,
+	    approvals: approvalGate,
+	    userInputs: userInputGate,
+	    artifactStore,
+	    attachmentStore: () => attachmentStore,
+	    memoryStore: () => memoryStore,
+	    nowIso
+	  })
+	  const migrationImportService = new RuntimeMigrationImportService({
+	    rootDir: join(activeOptions.dataDir, 'migrations', 'imports'),
+	    threadStore: rawThreadStore,
+	    sessionStore: rawSessionStore,
+	    maintenance: migrationMaintenance,
+	    attachmentStore: () => attachmentStore,
+	    artifactStore,
+	    memoryStore: () => memoryStore
+	  })
 	  let imageGenProviders = buildImageGenToolProviders(activeOptions.capabilities?.imageGen, {
 	    attachmentStore,
 	    nowIso
@@ -1370,6 +1396,8 @@ export async function createKunServeRuntime(
 	    get memoryStore() {
 	      return memoryStore
 	    },
+	    migrationService,
+	    migrationImportService,
 	    get delegationRuntime() {
 	      return delegationRuntime
 	    },
@@ -1495,7 +1523,9 @@ export async function createKunServeRuntime(
 	        extensionTools.disposeAll()
 	        await extensionModelProviders.disposeAll()
         shutdownAllLspSessions()
-        await mcpProviders.close()
+	        await mcpProviders.close()
+	        await migrationService.shutdown()
+	        await migrationImportService.shutdown()
       } finally {
         try {
           await agentObservability?.shutdown()
