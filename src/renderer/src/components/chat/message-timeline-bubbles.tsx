@@ -26,6 +26,8 @@ import {
 } from './user-input-panel-logic'
 import { InjectedMemoryMetaChip } from './injected-memory-meta-chip'
 import { isPresentationArtifactPath } from './presentation-file-artifacts'
+import { readGeneratedWorkspaceImagePreview } from './generated-media-preview'
+import { useTimelineFilePreviewWorkspaceRoot } from './timeline-file-preview-workspace'
 
 const COPY_FEEDBACK_RESET_MS = 1600
 const ASSISTANT_EXPORT_FORMATS: WriteExportFormat[] = ['pdf', 'docx', 'png', 'html']
@@ -692,7 +694,9 @@ function isMediaPreviewRequest(entry: MediaPreviewRequest | null): entry is Medi
 
 function useMediaPreviewUrls(media: TimelineMediaReference[]): Record<string, string> {
   const activeThreadId = useChatStore((s) => s.activeThreadId)
-  const workspaceRoot = useChatStore((s) => s.workspaceRoot)
+  const globalWorkspaceRoot = useChatStore((s) => s.workspaceRoot)
+  const timelineWorkspaceRoot = useTimelineFilePreviewWorkspaceRoot()
+  const workspaceRoot = timelineWorkspaceRoot || globalWorkspaceRoot
   const [resolvedPreviewUrls, setResolvedPreviewUrls] = useState<Record<string, string>>({})
   const [failedPreviewIds, setFailedPreviewIds] = useState<Record<string, true>>({})
   const previewRequests = useMemo(
@@ -737,11 +741,12 @@ function useMediaPreviewUrls(media: TimelineMediaReference[]): Record<string, st
             }
           }
           if (request.mode === 'workspace-image' && request.path && typeof window.kunGui?.readWorkspaceImage === 'function') {
-            const result = await window.kunGui.readWorkspaceImage({
+            const previewUrl = await readGeneratedWorkspaceImagePreview({
               path: request.path,
-              ...(workspaceRoot ? { workspaceRoot } : {})
+              ...(workspaceRoot ? { workspaceRoot } : {}),
+              readImage: window.kunGui.readWorkspaceImage
             })
-            if (result.ok) return { key: request.key, previewUrl: result.dataUrl }
+            if (previewUrl) return { key: request.key, previewUrl }
           }
           return { key: request.key, failed: true as const }
         } catch {
@@ -785,7 +790,9 @@ function MediaPreviewTile({
   variant: 'user' | 'tool' | 'conversation'
 }): ReactElement {
   const { t } = useTranslation('common')
-  const workspaceRoot = useChatStore((s) => s.workspaceRoot)
+  const globalWorkspaceRoot = useChatStore((s) => s.workspaceRoot)
+  const timelineWorkspaceRoot = useTimelineFilePreviewWorkspaceRoot()
+  const workspaceRoot = timelineWorkspaceRoot || globalWorkspaceRoot
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [imagePreviewOpen, setImagePreviewOpen] = useState(false)
   const unavailable = 'availability' in media && media.availability === 'unavailable'

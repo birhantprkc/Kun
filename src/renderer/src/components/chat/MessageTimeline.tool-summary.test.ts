@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { ChatBlock, NormalizedThread, ToolBlock } from '../../agent/types'
@@ -17,6 +17,7 @@ import {
   timelineFilePreviewWorkspaceRoot,
   useTimelineFilePreviewWorkspaceRoot
 } from './timeline-file-preview-workspace'
+import { readGeneratedWorkspaceImagePreview } from './generated-media-preview'
 
 const labels: Record<string, string> = {
   toolActionCommand: 'Ran command',
@@ -82,6 +83,34 @@ describe('MessageTimeline tool summaries', () => {
     )
 
     expect(html).toContain('/tmp/embedded-thread')
+  })
+
+  it('retries generated workspace images that are requested before the export is written', async () => {
+    const readImage = vi.fn()
+      .mockResolvedValueOnce({ ok: false, message: 'File not found' })
+      .mockResolvedValueOnce({
+        ok: true,
+        path: '/tmp/thread-workspace/.deepseekgui-images/diagram.png',
+        dataUrl: 'data:image/png;base64,ZGlhZ3JhbQ==',
+        mimeType: 'image/png',
+        size: 7
+      })
+    const wait = vi.fn(async () => undefined)
+
+    await expect(readGeneratedWorkspaceImagePreview({
+      path: '.deepseekgui-images/diagram.png',
+      workspaceRoot: '/tmp/thread-workspace',
+      readImage,
+      retryDelaysMs: [0, 25],
+      wait
+    })).resolves.toBe('data:image/png;base64,ZGlhZ3JhbQ==')
+
+    expect(readImage).toHaveBeenCalledTimes(2)
+    expect(readImage).toHaveBeenNthCalledWith(1, {
+      path: '.deepseekgui-images/diagram.png',
+      workspaceRoot: '/tmp/thread-workspace'
+    })
+    expect(wait).toHaveBeenCalledWith(25)
   })
 
   it('summarizes built-in read/write/edit tools with their file path', () => {
