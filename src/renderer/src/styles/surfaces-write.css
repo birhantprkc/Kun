@@ -599,6 +599,11 @@ html[data-ui-plugin-presentation='on'] {
   --kun-ui-plugin-host-surface-color: var(--surface-2, #ffffff);
 }
 
+html[data-ui-plugin-presentation='on'] .ds-chat-stage {
+  /* Keep host-drawn portraits and opaque frame ornaments out of the composer. */
+  --kun-ui-plugin-composer-safe-inset: 9rem;
+}
+
 .ds-ui-plugin-decor-layer,
 .ds-ui-plugin-character-layer,
 .ds-ui-plugin-readability-scrim {
@@ -612,14 +617,20 @@ html[data-ui-plugin-presentation='on'] {
 }
 
 html[data-ui-plugin-presentation='on'] .ds-ui-plugin-decor-layer {
-  z-index: 4;
+  /* Atmosphere and frame ornaments must stay below Kun's z-3 content layer.
+   * The character itself remains above content inside its reserved right rail. */
+  z-index: 1;
   display: block;
 }
 
 html[data-ui-plugin-presentation='on'] .ds-ui-plugin-character-layer {
   z-index: 5;
   display: flex;
-  inset: 4.75rem clamp(0.75rem, 3cqw, 3rem) 9rem clamp(0.75rem, 3cqw, 3rem);
+  inset:
+    4.75rem
+    clamp(0.75rem, 3cqw, 3rem)
+    var(--kun-ui-plugin-composer-safe-inset, 9rem)
+    clamp(0.75rem, 3cqw, 3rem);
   align-items: center;
   justify-content: flex-end;
   opacity: var(--kun-ui-plugin-character-opacity, 1);
@@ -884,7 +895,7 @@ html[data-ui-plugin-character-frame='polaroid'] .ds-ui-plugin-decor-layer::befor
 }
 
 html[data-ui-plugin-character-frame='polaroid'] .ds-ui-plugin-decor-layer::after {
-  bottom: 7%;
+  bottom: calc(var(--kun-ui-plugin-composer-safe-inset, 9rem) + 7%);
   right: 23%;
   transform: rotate(-7deg);
 }

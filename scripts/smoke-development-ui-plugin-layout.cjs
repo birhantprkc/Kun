@@ -464,6 +464,8 @@ async function readLayoutSnapshot(workbench) {
         visibility: value.visibility,
         opacity: value.opacity,
         overflowX: value.overflowX,
+        pointerEvents: value.pointerEvents,
+        zIndex: value.zIndex,
         translate: value.translate,
         transform: value.transform
       }
@@ -481,6 +483,7 @@ async function readLayoutSnapshot(workbench) {
     const character = document.querySelector('.ds-ui-plugin-character')
     const characterLayer = document.querySelector('.ds-ui-plugin-character-layer')
     const stage = document.querySelector('.ds-chat-stage')
+    const composer = document.querySelector('.ds-floating-composer')
     const cdpStyle = document.querySelector('#kun-ui-plugin-theme-cdp')
     const attributes = Object.fromEntries(
       root.getAttributeNames()
@@ -525,7 +528,10 @@ async function readLayoutSnapshot(workbench) {
       content: {
         stageContent: elementSnapshot('.ds-ui-plugin-stage-content'),
         timeline: elementSnapshot('.ds-message-timeline-content'),
-        composer: elementSnapshot('.ds-floating-composer'),
+        composer: {
+          ...elementSnapshot('.ds-floating-composer'),
+          topmostAtCenter: elementOwnsTopmostAtCenter(composer)
+        },
         sidebar: elementSnapshot('.ds-sidebar-shell'),
         topbar: elementSnapshot('.ds-topbar-surface')
       },
@@ -555,6 +561,16 @@ async function readLayoutSnapshot(workbench) {
       image.style.pointerEvents = previousImagePointerEvents
       layer.style.pointerEvents = previousLayerPointerEvents
       return topmost === image
+    }
+
+    function elementOwnsTopmostAtCenter(element) {
+      if (!(element instanceof HTMLElement)) return false
+      const bounds = element.getBoundingClientRect()
+      const topmost = document.elementFromPoint(
+        bounds.left + bounds.width / 2,
+        bounds.top + bounds.height / 2
+      )
+      return topmost instanceof Element && element.contains(topmost)
     }
   })
 }
@@ -590,6 +606,28 @@ function assertWidePresentation(id, snapshot) {
   }
   if (snapshot.layers.character.style?.display === 'none' || !hasArea(snapshot.layers.character.rect)) {
     throw new Error(`${id}: character layer is hidden in the wide Kun workbench`)
+  }
+  const contentZIndex = numericZIndex(snapshot.content.stageContent.style?.zIndex)
+  for (const name of ['decor', 'scrim']) {
+    const layer = snapshot.layers[name]
+    const layerZIndex = numericZIndex(layer.style?.zIndex)
+    if (layerZIndex === null || contentZIndex === null || layerZIndex >= contentZIndex) {
+      throw new Error(
+        `${id}: ${name} z-index ${layer.style?.zIndex ?? 'missing'} must stay below ` +
+        `Kun content z-index ${snapshot.content.stageContent.style?.zIndex ?? 'missing'}`
+      )
+    }
+  }
+  for (const [name, layer] of Object.entries(snapshot.layers)) {
+    if (layer.style?.pointerEvents !== 'none') {
+      throw new Error(`${id}: ${name} presentation layer can intercept pointer input`)
+    }
+  }
+  if (!snapshot.content.composer.topmostAtCenter) {
+    throw new Error(`${id}: Composer does not own the topmost hit target at its center`)
+  }
+  if (rectanglesOverlap(snapshot.character.rect, snapshot.content.topbar.rect)) {
+    throw new Error(`${id}: portrait overlaps the Kun top bar`)
   }
   if (!hasArea(snapshot.stage.rect)) throw new Error(`${id}: Kun chat stage is unavailable`)
   const widthRatio = snapshot.character.rect.width / snapshot.stage.rect.width
@@ -638,6 +676,12 @@ function assertNoHorizontalOverflow(id, viewport, snapshot) {
 
 function hasArea(rect) {
   return Boolean(rect && rect.width > 0 && rect.height > 0)
+}
+
+function numericZIndex(value) {
+  if (typeof value !== 'string' || !/^-?\d+$/.test(value)) return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : null
 }
 
 function rectanglesOverlap(left, right) {
