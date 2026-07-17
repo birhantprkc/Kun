@@ -308,7 +308,7 @@ export function Workbench(): ReactElement {
   const {
     activeClawChannel, activeCodeCanvasWorkspace, activeSkillWorkspace, codeThreads,
     composerChangeSummary, currentSideConversations, currentSideRunningCount, devPreviewBlocks,
-    latestAutoOpenDevPreviewUrl, latestDevPreviewUrl, lockVisionToTextModelSwitch,
+    latestAutoOpenDevPreviewUrl, latestDevPreviewUrl,
     timelineBlocks, timelineLiveAssistant, timelineLiveReasoning
   } = useWorkbenchDerivedState({
     activeClawChannelId,
@@ -317,7 +317,6 @@ export function Workbench(): ReactElement {
     clawChannels,
     liveAssistant,
     liveReasoning,
-    route,
     sideConversations,
     threads,
     workspaceRoot
@@ -813,7 +812,7 @@ export function Workbench(): ReactElement {
     input, setInput, composerMode, setComposerMode, busy, route, runtimeReady: runtimeConnection === 'ready',
     activeThreadId, selectedContextWindowTokens, runtimeInfo, activeClawChannelId,
     activeClawChannelModel: activeClawChannel?.model, composerModel, composerProviderId, composerPickList,
-    composerModelGroups, composerReasoningEffort, setComposerReasoningEffort, lockVisionToTextModelSwitch,
+    composerModelGroups, composerReasoningEffort, setComposerReasoningEffort,
     setClawChannelModel, setComposerModel, openProvidersSettings: () => openSettings('providers'), handleSend,
     composerAttachments,
     contextChips: extensionComposerContextChips,

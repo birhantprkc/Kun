@@ -26,7 +26,6 @@ type UseWorkbenchChatComposerPropsInput = {
   composerModelGroups: ComposerProps['composerModelGroups']
   composerReasoningEffort: ComposerProps['composerReasoningEffort']
   setComposerReasoningEffort: ComposerProps['onComposerReasoningEffortChange']
-  lockVisionToTextModelSwitch: boolean
   setClawChannelModel: (channelId: string, modelId: string, providerId?: string) => void | Promise<unknown>
   setComposerModel: (modelId: string, providerId?: string) => void
   openProvidersSettings: () => void
@@ -92,7 +91,6 @@ export function useWorkbenchChatComposerProps({
   composerModelGroups,
   composerReasoningEffort,
   setComposerReasoningEffort,
-  lockVisionToTextModelSwitch,
   setClawChannelModel,
   setComposerModel,
   openProvidersSettings,
@@ -159,7 +157,6 @@ export function useWorkbenchChatComposerProps({
     composerModelGroups,
     composerReasoningEffort: route === 'chat' || route === 'claw' ? composerReasoningEffort : undefined,
     modelControlVariant: route === 'chat' && !activeSddDraft ? 'split' : 'combined',
-    lockVisionToTextModelSwitch,
     onComposerModelChange: (modelId, providerId) => {
       if (route === 'claw' && activeClawChannelId) {
         void setClawChannelModel(activeClawChannelId, modelId, providerId)
@@ -256,7 +253,6 @@ export function useWorkbenchChatComposerProps({
     guideQueuedMessage,
     input,
     interrupt,
-    lockVisionToTextModelSwitch,
     openChangesPanel,
     openDesignFileTreeSidePanel,
     openFileTreeSidePanel,
