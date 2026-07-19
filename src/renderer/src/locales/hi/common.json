@@ -2705,6 +2705,8 @@
   "toolAttachments": "अनुलग्नक",
   "toolExtensionContexts": "विस्तार प्रसंग",
   "generatedFilesTitle": "जेनरेट की गई फ़ाइलें",
+  "generatedFilesPreviousImages": "पिछली छवियाँ",
+  "generatedFilesNextImages": "अगली छवियाँ",
   "generatedFilePreviewUnavailable": "पूर्वावलोकन अनुपलब्ध",
   "generatedFileDownload": "डाउनलोड करें",
   "generatedFileSaving": "सहेजा जा रहा है...",

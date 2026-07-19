@@ -2705,6 +2705,8 @@
   "toolAttachments": "Attachments",
   "toolExtensionContexts": "Extension context",
   "generatedFilesTitle": "Generated files",
+  "generatedFilesPreviousImages": "Previous images",
+  "generatedFilesNextImages": "Next images",
   "generatedFilePreviewUnavailable": "Preview unavailable",
   "generatedFileDownload": "Download",
   "generatedFileSaving": "Saving…",

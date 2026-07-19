@@ -1,7 +1,7 @@
 import type { ReactElement } from 'react'
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ArrowDown, Check, ChevronDown, ChevronRight, Copy, Download, File, FileEdit, GitFork, ImageIcon, Loader2, MessageSquareQuote, PencilLine, RotateCcw, Terminal, Video, Wrench } from 'lucide-react'
+import { ArrowDown, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, File, FileEdit, GitFork, ImageIcon, Loader2, MessageSquareQuote, PencilLine, RotateCcw, Terminal, Video, Wrench } from 'lucide-react'
 import type { AttachmentReference, ChatBlock, GeneratedFileReference, RuntimeDisclosureMetadata, ToolBlock, UserFileReference, UserInputAnswer } from '../../agent/types'
 import { extractUnifiedDiffText } from '../../lib/diff-stats'
 import { useChatStore } from '../../store/chat-store'
@@ -688,6 +688,27 @@ type MediaPreviewRequest =
   | { key: string; id: string; mode: 'attachment' }
   | { key: string; path: string; mode: 'workspace-image' }
 
+type GeneratedMediaScrollAvailability = {
+  canScrollBackward: boolean
+  canScrollForward: boolean
+}
+
+export function generatedMediaScrollAvailability({
+  scrollLeft,
+  clientWidth,
+  scrollWidth
+}: {
+  scrollLeft: number
+  clientWidth: number
+  scrollWidth: number
+}): GeneratedMediaScrollAvailability {
+  const edgeTolerance = 2
+  return {
+    canScrollBackward: scrollLeft > edgeTolerance,
+    canScrollForward: scrollLeft + clientWidth < scrollWidth - edgeTolerance
+  }
+}
+
 function isMediaPreviewRequest(entry: MediaPreviewRequest | null): entry is MediaPreviewRequest {
   return entry !== null
 }
@@ -800,17 +821,14 @@ function MediaPreviewTile({
   const filePath = mediaPath(media)
   const mimeType = media.mimeType || (mediaIsImage(media) ? 'image' : mediaIsVideo(media) ? 'video' : '')
   const byteSize = formatByteSize(media.byteSize)
-  const hasRichPreview = !unavailable && !!previewUrl && (mediaIsImage(media) || mediaIsVideo(media))
   const tileClass =
     variant === 'conversation'
-      ? hasRichPreview
-        ? 'h-72 w-full overflow-hidden rounded-lg border border-ds-border-muted bg-ds-card shadow-sm sm:h-80'
-        : 'min-h-44 w-full overflow-hidden rounded-lg border border-ds-border-muted bg-ds-card shadow-sm'
+      ? 'group aspect-square w-52 shrink-0 snap-start overflow-hidden rounded-xl border border-ds-border-muted bg-ds-card shadow-sm'
       : variant === 'tool'
         ? 'block h-32 w-40 overflow-hidden rounded-lg border border-ds-border-muted bg-ds-card shadow-sm'
         : 'block h-28 w-36 overflow-hidden rounded-lg border border-ds-border-muted bg-ds-card shadow-sm'
   const revealClass = variant === 'user' ? '' : ' ds-media-printer-reveal'
-  const mediaClass = 'h-full w-full object-contain'
+  const mediaClass = `h-full w-full ${variant === 'conversation' ? 'object-cover' : 'object-contain'}`
   const canSave = !unavailable && Boolean(filePath || dataUrlPayload(previewUrl))
   const canOpenArtifact = !unavailable && Boolean(
     media.artifactId && media.ownerExtensionId && media.ownerExtensionVersion &&
@@ -872,7 +890,11 @@ function MediaPreviewTile({
   const saveButtonClass =
     'inline-flex h-7 items-center justify-center rounded-md border border-ds-border-muted bg-ds-card/90 px-2 text-[11.5px] font-medium text-ds-muted shadow-sm transition hover:bg-ds-hover hover:text-ds-ink disabled:cursor-not-allowed disabled:opacity-50'
   const iconButtonClass =
-    'absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center rounded-md border border-ds-border-muted bg-ds-card/92 text-ds-muted shadow-sm backdrop-blur transition hover:bg-ds-hover hover:text-ds-ink disabled:cursor-not-allowed disabled:opacity-50'
+    `absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center rounded-md border border-ds-border-muted bg-ds-card/92 text-ds-muted shadow-sm backdrop-blur transition hover:bg-ds-hover hover:text-ds-ink disabled:cursor-not-allowed disabled:opacity-50 ${
+      variant === 'conversation'
+        ? 'opacity-0 focus-visible:opacity-100 group-hover:opacity-100'
+        : ''
+    }`
   const saveIcon = saveState === 'saving'
     ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.9} />
     : saveState === 'saved'
@@ -1009,28 +1031,116 @@ function MediaAttachmentGallery({
   media: TimelineMediaReference[]
   variant: 'user' | 'tool' | 'conversation'
 }): ReactElement | null {
+  const { t } = useTranslation('common')
   const resolvedPreviewUrls = useMediaPreviewUrls(media)
+  const conversationScrollerRef = useRef<HTMLDivElement>(null)
+  const [scrollAvailability, setScrollAvailability] = useState<GeneratedMediaScrollAvailability>({
+    canScrollBackward: false,
+    canScrollForward: false
+  })
+
+  useEffect(() => {
+    if (variant !== 'conversation') return
+    const scroller = conversationScrollerRef.current
+    if (!scroller) return
+
+    const updateAvailability = (): void => {
+      const next = generatedMediaScrollAvailability(scroller)
+      setScrollAvailability((current) =>
+        current.canScrollBackward === next.canScrollBackward &&
+        current.canScrollForward === next.canScrollForward
+          ? current
+          : next
+      )
+    }
+    updateAvailability()
+    scroller.addEventListener('scroll', updateAvailability, { passive: true })
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateAvailability)
+      return () => {
+        scroller.removeEventListener('scroll', updateAvailability)
+        window.removeEventListener('resize', updateAvailability)
+      }
+    }
+
+    const resizeObserver = new ResizeObserver(updateAvailability)
+    resizeObserver.observe(scroller)
+    return () => {
+      scroller.removeEventListener('scroll', updateAvailability)
+      resizeObserver.disconnect()
+    }
+  }, [media.length, variant])
+
   if (media.length === 0) return null
   const wrapperClass =
-    variant === 'conversation'
-      ? `grid w-full max-w-2xl grid-cols-1 gap-2 ${media.length > 1 ? 'sm:grid-cols-2' : ''}`
-      : variant === 'tool'
+    variant === 'tool'
         ? 'flex min-w-0 flex-wrap gap-2 border-t border-ds-border-muted/60 px-4 py-3'
         : 'flex max-w-[80%] flex-wrap justify-end gap-2'
 
+  const tiles = media.map((item) => {
+    const key = mediaKey(item)
+    return (
+      <MediaPreviewTile
+        key={key}
+        media={item}
+        previewUrl={item.previewUrl ?? resolvedPreviewUrls[key]}
+        variant={variant}
+      />
+    )
+  })
+
+  if (variant === 'conversation') {
+    const moveCarousel = (direction: -1 | 1): void => {
+      const scroller = conversationScrollerRef.current
+      if (!scroller) return
+      scroller.scrollBy({
+        left: direction * Math.max(220, scroller.clientWidth * 0.72),
+        behavior: 'smooth'
+      })
+    }
+    const showCarouselControls = scrollAvailability.canScrollBackward || scrollAvailability.canScrollForward
+
+    return (
+      <div className="group/gallery relative min-w-0 w-full" data-extension-attachment-context data-generated-media-carousel>
+        <div
+          ref={conversationScrollerRef}
+          className="flex w-full snap-x snap-mandatory gap-2 overflow-x-auto px-0.5 pb-1 scroll-smooth [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          data-generated-media-strip
+        >
+          {tiles}
+        </div>
+        {showCarouselControls ? (
+          <div className="absolute bottom-3 right-3 flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => moveCarousel(-1)}
+              disabled={!scrollAvailability.canScrollBackward}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white shadow-md backdrop-blur-sm transition hover:bg-black/70 disabled:cursor-default disabled:opacity-35"
+              title={t('generatedFilesPreviousImages')}
+              aria-label={t('generatedFilesPreviousImages')}
+            >
+              <ChevronLeft className="h-5 w-5" strokeWidth={2} />
+            </button>
+            <button
+              type="button"
+              onClick={() => moveCarousel(1)}
+              disabled={!scrollAvailability.canScrollForward}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-black/55 text-white shadow-md backdrop-blur-sm transition hover:bg-black/70 disabled:cursor-default disabled:opacity-35"
+              title={t('generatedFilesNextImages')}
+              aria-label={t('generatedFilesNextImages')}
+            >
+              <ChevronRight className="h-5 w-5" strokeWidth={2} />
+            </button>
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
   return (
     <div className={wrapperClass} data-extension-attachment-context>
-      {media.map((item) => {
-        const key = mediaKey(item)
-        return (
-          <MediaPreviewTile
-            key={key}
-            media={item}
-            previewUrl={item.previewUrl ?? resolvedPreviewUrls[key]}
-            variant={variant}
-          />
-        )
-      })}
+      {tiles}
     </div>
   )
 }
@@ -1053,7 +1163,10 @@ export function GeneratedFilesPanel({ blocks }: { blocks: ToolBlock[] }): ReactE
 
   return (
     <div className="flex min-w-0 flex-col gap-2">
-      <div className="text-[12px] font-semibold text-ds-faint">{t('generatedFilesTitle')}</div>
+      <div className="flex items-center gap-1.5 text-[12px] font-semibold text-ds-faint">
+        <ImageIcon className="h-3.5 w-3.5" strokeWidth={1.8} aria-hidden="true" />
+        <span>{t('generatedFilesTitle')}</span>
+      </div>
       <MediaAttachmentGallery media={media} variant="conversation" />
     </div>
   )

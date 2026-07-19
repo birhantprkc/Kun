@@ -2705,6 +2705,8 @@
   "toolAttachments": "附件",
   "toolExtensionContexts": "扩展上下文",
   "generatedFilesTitle": "生成文件",
+  "generatedFilesPreviousImages": "上一组图片",
+  "generatedFilesNextImages": "下一组图片",
   "generatedFilePreviewUnavailable": "无法预览",
   "generatedFileDownload": "下载",
   "generatedFileSaving": "保存中…",

@@ -2705,6 +2705,8 @@
   "toolAttachments": "ไฟล์แนบ",
   "toolExtensionContexts": "บริบทส่วนขยาย",
   "generatedFilesTitle": "ไฟล์ที่สร้างขึ้น",
+  "generatedFilesPreviousImages": "รูปภาพก่อนหน้า",
+  "generatedFilesNextImages": "รูปภาพถัดไป",
   "generatedFilePreviewUnavailable": "ดูตัวอย่างไม่พร้อมใช้งาน",
   "generatedFileDownload": "ดาวน์โหลด",
   "generatedFileSaving": "กำลังบันทึก...",

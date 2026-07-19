@@ -2705,6 +2705,8 @@
   "toolAttachments": "첨부파일",
   "toolExtensionContexts": "확장 컨텍스트",
   "generatedFilesTitle": "생성된 파일",
+  "generatedFilesPreviousImages": "이전 이미지",
+  "generatedFilesNextImages": "다음 이미지",
   "generatedFilePreviewUnavailable": "미리보기를 사용할 수 없습니다.",
   "generatedFileDownload": "다운로드",
   "generatedFileSaving": "저장 중…",

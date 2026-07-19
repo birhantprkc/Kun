@@ -2705,6 +2705,8 @@
   "toolAttachments": "Вложения",
   "toolExtensionContexts": "Контекст расширения",
   "generatedFilesTitle": "Сгенерированные файлы",
+  "generatedFilesPreviousImages": "Предыдущие изображения",
+  "generatedFilesNextImages": "Следующие изображения",
   "generatedFilePreviewUnavailable": "Предварительный просмотр недоступен",
   "generatedFileDownload": "Скачать",
   "generatedFileSaving": "Сохранение…",

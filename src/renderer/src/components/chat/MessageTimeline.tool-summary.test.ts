@@ -10,7 +10,11 @@ import {
   resultPreviewSourcesForTurn,
   summarizeToolBlock
 } from './MessageTimeline'
-import { GeneratedFilesPanel, MessageBubble } from './message-timeline-bubbles'
+import {
+  GeneratedFilesPanel,
+  MessageBubble,
+  generatedMediaScrollAvailability
+} from './message-timeline-bubbles'
 import { ProcessSectionRow } from './message-timeline-process'
 import {
   TimelineFilePreviewWorkspaceProvider,
@@ -317,6 +321,30 @@ describe('MessageTimeline Kun runtime metadata smoke', () => {
     expect(html).toContain('<img')
     expect(html).toContain('src="data:image/png;base64,paint"')
     expect(html).toContain('ds-media-printer-reveal')
+    expect(html).toContain('data-generated-media-carousel')
+    expect(html).toContain('data-generated-media-strip')
+    expect(html).toContain('aspect-square')
+    expect(html).toContain('object-cover')
+    expect(html).not.toContain('sm:grid-cols-2')
+  })
+
+  it('reports the available directions for the generated image strip', () => {
+    expect(generatedMediaScrollAvailability({
+      scrollLeft: 0,
+      clientWidth: 640,
+      scrollWidth: 1_100
+    })).toEqual({
+      canScrollBackward: false,
+      canScrollForward: true
+    })
+    expect(generatedMediaScrollAvailability({
+      scrollLeft: 460,
+      clientWidth: 640,
+      scrollWidth: 1_100
+    })).toEqual({
+      canScrollBackward: true,
+      canScrollForward: false
+    })
   })
 
   it('renders revoked generated artifacts as explicitly unavailable', () => {

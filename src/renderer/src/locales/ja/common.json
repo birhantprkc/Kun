@@ -2705,6 +2705,8 @@
   "toolAttachments": "添付ファイル",
   "toolExtensionContexts": "拡張コンテキスト",
   "generatedFilesTitle": "生成されたファイル",
+  "generatedFilesPreviousImages": "前の画像",
+  "generatedFilesNextImages": "次の画像",
   "generatedFilePreviewUnavailable": "プレビューは利用できません",
   "generatedFileDownload": "ダウンロード",
   "generatedFileSaving": "保存中…",
