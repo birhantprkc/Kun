@@ -23,6 +23,11 @@ import {
   sameFilesystemPath,
   workspaceRoot
 } from './workspace-path.js'
+import {
+  resolveWindowsShellCandidates,
+  WINDOWS_POWERSHELL_COMMAND_ARGS,
+  windowsSystemRoot
+} from './windows-shell-resolver.js'
 
 export { workspaceRoot } from './workspace-path.js'
 
@@ -244,21 +249,6 @@ export function describeKind(mode: TruncateMode): string {
   return mode === 'head' ? 'first' : 'last'
 }
 
-const WINDOWS_POWERSHELL_ARGS = ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command']
-
-// `%SystemRoot%` (a.k.a. `%windir%`) — the Windows install directory. Always
-// present in a sane environment; the literal fallback covers the rare case
-// where even that has been stripped from the spawned process's env.
-function windowsSystemRoot(env: NodeJS.ProcessEnv = process.env): string {
-  return env.SystemRoot || env.windir || env.SYSTEMROOT || 'C:\\Windows'
-}
-
-// Absolute path to cmd.exe. `%ComSpec%` is the canonical pointer the OS itself
-// uses; fall back to System32\cmd.exe so we never depend on PATH resolution.
-function windowsComSpec(env: NodeJS.ProcessEnv = process.env): string {
-  return env.ComSpec || env.COMSPEC || win32.join(windowsSystemRoot(env), 'System32', 'cmd.exe')
-}
-
 export type ShellRuntimeInfo = ShellConfig & {
   name: string
   syntax: string
@@ -274,10 +264,6 @@ export type ShellRuntimePlanOptions = {
   lookup?: SpawnSyncLike
   fileExists?: (path: string) => boolean
   env?: NodeJS.ProcessEnv
-}
-
-function isWindowsAppsAlias(candidate: string): boolean {
-  return /(?:^|[\\/])windowsapps(?:[\\/]|$)/i.test(candidate)
 }
 
 function pathExists(fileExists: (path: string) => boolean, candidate: string): boolean {
@@ -307,68 +293,24 @@ function runtimePlan(configs: ShellConfig[], platform: NodeJS.Platform): ShellRu
   return { primary, candidates }
 }
 
-function windowsPowerShellConfigs(
-  lookup: SpawnSyncLike,
-  fileExists: (path: string) => boolean,
-  env: NodeJS.ProcessEnv
-): ShellConfig[] {
-  const configs: ShellConfig[] = []
-  const programFilesRoots = [env.ProgramW6432, env.ProgramFiles, env['ProgramFiles(x86)']]
-    .map((value) => value?.trim() ?? '')
-    .filter(Boolean)
-  for (const root of programFilesRoots) {
-    const pwsh = win32.join(root, 'PowerShell', '7', 'pwsh.exe')
-    if (pathExists(fileExists, pwsh)) configs.push({ shell: pwsh, args: WINDOWS_POWERSHELL_ARGS })
-  }
-
-  for (const pwsh of lookupResults(lookup, 'where', ['pwsh.exe'])) {
-    // WindowsApps execution aliases are not reliable launchable executables
-    // from a packaged Electron process.
-    if (!isWindowsAppsAlias(pwsh)) configs.push({ shell: pwsh, args: WINDOWS_POWERSHELL_ARGS })
-  }
-
-  const windowsPowerShell = win32.join(
-    windowsSystemRoot(env),
-    'System32',
-    'WindowsPowerShell',
-    'v1.0',
-    'powershell.exe'
-  )
-  if (pathExists(fileExists, windowsPowerShell)) {
-    configs.push({ shell: windowsPowerShell, args: WINDOWS_POWERSHELL_ARGS })
-  }
-
-  for (const powershell of lookupResults(lookup, 'where', ['powershell.exe'])) {
-    if (!isWindowsAppsAlias(powershell)) {
-      configs.push({ shell: powershell, args: WINDOWS_POWERSHELL_ARGS })
-    }
-  }
-  return uniqueShellConfigs(configs, 'win32')
-}
-
 export function shellRuntimePlan(options: ShellRuntimePlanOptions = {}): ShellRuntimePlan {
   const platform = options.platform ?? process.platform
-  const lookup = options.lookup ?? spawnSync
-  const fileExists = options.fileExists ?? existsSync
-  const env = options.env ?? process.env
 
   if (platform === 'win32') {
-    const powershells = windowsPowerShellConfigs(lookup, fileExists, env)
-    if (powershells.length > 0) return runtimePlan(powershells, platform)
-
-    const bashes = lookupResults(lookup, 'where', ['bash.exe'])
-      .filter((candidate) => !isWindowsAppsAlias(candidate))
-      .map((shell) => ({ shell, args: ['-lc'] }))
-    if (bashes.length > 0) return runtimePlan(bashes, platform)
-
-    // Keep cmd fallbacks in one syntax family and retain the canonical system
-    // path after a possibly broken ComSpec entry.
-    return runtimePlan([
-      { shell: windowsComSpec(env), args: ['/d', '/s', '/c'] },
-      { shell: win32.join(windowsSystemRoot(env), 'System32', 'cmd.exe'), args: ['/d', '/s', '/c'] }
-    ], platform)
+    const resolverOptions = {
+      ...(options.lookup ? { lookup: options.lookup } : {}),
+      ...(options.fileExists ? { fileExists: options.fileExists } : {}),
+      ...(options.env ? { env: options.env } : {})
+    }
+    return runtimePlan(
+      resolveWindowsShellCandidates(resolverOptions)
+        .map((candidate) => ({ shell: candidate.file, args: [...candidate.commandArgs] })),
+      platform
+    )
   }
 
+  const lookup = options.lookup ?? spawnSync
+  const fileExists = options.fileExists ?? existsSync
   const configs: ShellConfig[] = []
   if (pathExists(fileExists, '/bin/bash')) configs.push({ shell: '/bin/bash', args: ['-lc'] })
   for (const shell of lookupResults(lookup, 'which', ['bash'])) configs.push({ shell, args: ['-lc'] })
@@ -377,12 +319,17 @@ export function shellRuntimePlan(options: ShellRuntimePlanOptions = {}): ShellRu
 }
 
 export function shellConfig(
-  platform: NodeJS.Platform = process.platform,
-  lookup: SpawnSyncLike = spawnSync,
-  fileExists: (path: string) => boolean = existsSync,
-  env: NodeJS.ProcessEnv = process.env
+  platform?: NodeJS.Platform,
+  lookup?: SpawnSyncLike,
+  fileExists?: (path: string) => boolean,
+  env?: NodeJS.ProcessEnv
 ): ShellConfig {
-  const { shell, args } = shellRuntimePlan({ platform, lookup, fileExists, env }).primary
+  const { shell, args } = shellRuntimePlan({
+    ...(platform ? { platform } : {}),
+    ...(lookup ? { lookup } : {}),
+    ...(fileExists ? { fileExists } : {}),
+    ...(env ? { env } : {})
+  }).primary
   return { shell, args }
 }
 
@@ -491,7 +438,7 @@ export function shellCommandArgs(config: ShellConfig, command: string): string[]
   const name = shellDisplayName(config.shell)
   if (name === 'pwsh' || name === 'powershell') {
     const script = `${POWERSHELL_UTF8_OUTPUT_PREAMBLE}\n${command}`
-    return [...WINDOWS_POWERSHELL_ARGS, script]
+    return [...WINDOWS_POWERSHELL_COMMAND_ARGS, script]
   }
   return [...config.args, command]
 }
@@ -615,14 +562,20 @@ export function createShellCommandRunner(options: ShellCommandRunnerOptions = {}
     candidates,
     async spawn(command, spawnOptions) {
       const attempts: ShellSpawnAttempt[] = []
-      const childOptions: SpawnOptions = {
+      const safeEnv = shellSpawnEnv(spawnOptions.env ?? env, platform)
+      const baseChildOptions: SpawnOptions = {
         ...spawnOptions,
-        env: shellSpawnEnv(spawnOptions.env ?? env, platform),
         windowsHide: spawnOptions.windowsHide ?? true,
         shell: false
       }
       for (const runtime of candidates) {
         try {
+          const childOptions: SpawnOptions = {
+            ...baseChildOptions,
+            env: platform === 'win32' && runtime.name === 'bash'
+              ? { ...safeEnv, CHERE_INVOKING: '1' }
+              : safeEnv
+          }
           const child = spawnImpl(runtime.shell, shellCommandArgs(runtime, command), childOptions)
           await waitForSpawn(child)
           return { child, runtime }

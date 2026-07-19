@@ -45,13 +45,15 @@ function spawnFailure(code: string, errno: number): NodeJS.ErrnoException {
 }
 
 describe('shellConfig', () => {
-  it('prefers PowerShell on Windows even when Git Bash is available', () => {
+  it('prefers Git Bash on Windows when Git for Windows is installed', () => {
+    const gitBash = 'C:\\Program Files\\Git\\bin\\bash.exe'
     expect(shellConfig('win32', lookup({
       'where pwsh.exe': 'C:\\Program Files\\PowerShell\\7\\pwsh.exe\r\n',
-      'where bash.exe': 'C:\\Program Files\\Git\\bin\\bash.exe\r\n'
-    }), () => false, {})).toEqual({
-      shell: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
-      args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command']
+      'where git.exe': 'C:\\Program Files\\Git\\cmd\\git.exe\r\n',
+      'where bash.exe': `${gitBash}\r\n`
+    }), (path) => path === gitBash, {})).toEqual({
+      shell: gitBash,
+      args: ['-lc']
     })
   })
 
@@ -65,10 +67,12 @@ describe('shellConfig', () => {
   })
 
   it('falls back to Git Bash on Windows when PowerShell is unavailable', () => {
+    const gitBash = 'C:\\Program Files\\Git\\bin\\bash.exe'
     expect(shellConfig('win32', lookup({
-      'where bash.exe': 'C:\\Program Files\\Git\\bin\\bash.exe\r\n'
-    }), () => false, {})).toEqual({
-      shell: 'C:\\Program Files\\Git\\bin\\bash.exe',
+      'where git.exe': 'C:\\Program Files\\Git\\cmd\\git.exe\r\n',
+      'where bash.exe': `${gitBash}\r\n`
+    }), (path) => path === gitBash, {})).toEqual({
+      shell: gitBash,
       args: ['-lc']
     })
   })
@@ -100,11 +104,13 @@ describe('shellConfig', () => {
       env: { SystemRoot: 'C:\\Windows' }
     })
 
-    expect(plan.candidates.map((candidate) => candidate.shell)).toEqual([
+    expect(plan.candidates
+      .filter((candidate) => candidate.syntax === 'PowerShell')
+      .map((candidate) => candidate.shell)).toEqual([
       'D:\\Tools\\PowerShell\\pwsh.exe',
       winPowerShell
     ])
-    expect(plan.candidates.every((candidate) => candidate.syntax === 'PowerShell')).toBe(true)
+    expect(plan.candidates.at(-1)?.syntax).toBe('cmd.exe batch')
     expect(plan.candidates.some((candidate) => /WindowsApps/i.test(candidate.shell))).toBe(false)
   })
 
@@ -274,6 +280,35 @@ describe('shell runtime metadata', () => {
 })
 
 describe('shell command runner', () => {
+  it('keeps the requested cwd when Windows Git Bash loads its profile', async () => {
+    const bash = shellRuntimeInfo({
+      shell: 'C:\\Program Files\\Git\\bin\\bash.exe',
+      args: ['-lc']
+    })
+    const child = new EventEmitter()
+    const spawnImpl = vi.fn(() => {
+      queueMicrotask(() => child.emit('spawn'))
+      return child as never
+    })
+    const runner = createShellCommandRunner({
+      platform: 'win32',
+      env: { Path: 'C:\\Tools', SystemRoot: 'C:\\Windows' },
+      plan: { primary: bash, candidates: [bash] },
+      spawnImpl: spawnImpl as never
+    })
+
+    await runner.spawn('pwd', { cwd: 'C:\\Workspace' })
+
+    expect(spawnImpl).toHaveBeenCalledWith(
+      bash.shell,
+      ['-lc', 'pwd'],
+      expect.objectContaining({
+        cwd: 'C:\\Workspace',
+        env: expect.objectContaining({ CHERE_INVOKING: '1' })
+      })
+    )
+  })
+
   it('retries a same-syntax candidate when error arrives before spawn', async () => {
     const primary = powerShellRuntime('C:\\Blocked\\pwsh.exe')
     const fallback = powerShellRuntime('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
