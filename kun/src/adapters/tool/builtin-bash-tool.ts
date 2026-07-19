@@ -911,12 +911,11 @@ export function createBashLocalTool(options: BashLocalToolOptions = {}): LocalTo
   const shellRuntime = shellRunner.runtime
   return LocalToolHost.defineTool({
     name: 'bash',
-    description: `Execute a shell command in the workspace using the host platform shell. Current shell: ${shellRuntime.name}. Use ${shellRuntime.syntax} syntax. Return combined stdout and stderr. Runs synchronously by default (background defaults to false). Set background=true to start a detached session that keeps running after the turn ends; the tool assigns an 8-character session_id in the response. Use the background_shell tool to list, read, poll, write, or stop background sessions.`,
+    description: `Execute a shell command in the workspace using the host platform shell. Current shell: ${shellRuntime.name}. Use ${shellRuntime.syntax} syntax. Return combined stdout and stderr. Commands use a runtime-owned 24-hour ceiling. Runs synchronously by default (background defaults to false). Set background=true to start a detached session that keeps running after the turn ends; the tool assigns an 8-character session_id in the response. Use the background_shell tool to list, read, poll, write, or stop background sessions.`,
     inputSchema: {
       type: 'object',
       properties: {
         command: { type: 'string' },
-        timeout: { type: 'number' },
         background: { type: 'boolean', default: false }
       },
       required: [],
@@ -928,8 +927,8 @@ export function createBashLocalTool(options: BashLocalToolOptions = {}): LocalTo
       const command = typeof args.command === 'string' ? args.command : ''
       if (!command.trim()) return { output: { error: 'command is required' }, isError: true }
       const timeout = normalizePositiveInteger(
-        args.timeout,
-        options.defaultTimeoutSeconds ?? DEFAULT_BASH_TIMEOUT_SECONDS
+        options.defaultTimeoutSeconds,
+        DEFAULT_BASH_TIMEOUT_SECONDS
       )
       const background = args.background === true
       const cwd = workspaceRoot(context.workspace)

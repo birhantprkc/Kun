@@ -4,7 +4,7 @@ import type { LocalTool } from './local-tool-host.js'
 
 export type FsStats = NonNullable<Awaited<ReturnType<typeof stat>>>
 
-export const DEFAULT_BASH_TIMEOUT_SECONDS = 120
+export const DEFAULT_BASH_TIMEOUT_SECONDS = 24 * 60 * 60
 export const DEFAULT_SEARCH_LIMIT = 100
 export const DEFAULT_LIST_LIMIT = 500
 export const DEFAULT_FIND_LIMIT = 1000
