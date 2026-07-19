@@ -38,6 +38,7 @@
     "pack:kun-video-editor": "npm run build:kun && npm run build:bundled-extensions && node ./scripts/pack-kun-video-editor.mjs --require-bundled-identity",
     "verify:kun-video-editor-package": "npm run build:kun && npm run build:bundled-extensions && node ./scripts/pack-kun-video-editor.mjs --verify --require-bundled-identity",
     "check:extensions": "npm run check:extension-schema && npm run check:extension-docs && npm run check:extension-examples && npm run check:extension-release-gate",
+    "audit:production": "node ./scripts/check-production-audit.mjs",
     "lint": "eslint .",
     "test": "npm run test:extensions && vitest run",
     "test:watch": "vitest",

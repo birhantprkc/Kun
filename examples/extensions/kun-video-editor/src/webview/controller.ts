@@ -84,6 +84,7 @@ import type {
 const TERMINAL_AGENT_STATES = new Set(['completed', 'failed', 'cancelled', 'budget-exhausted'])
 const TERMINAL_JOB_STATES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const JOB_STATUS_RECONCILE_INTERVAL_MS = 1_000
+const ACTIVE_PROJECT_RECONCILE_INTERVAL_MS = 5_000
 const SELECTION_SYNC_DEBOUNCE_MS = 120
 const EDITOR_COMMAND = 'editor-request'
 const COMMAND_PROGRESS_MESSAGE_KEYS: Readonly<Record<string, MessageKey>> = {
@@ -547,12 +548,22 @@ export function useEditorController(client: ExtensionHostClient): EditorControll
     return projects
   }, [copy, execute, pushNotice])
 
-  const loadActiveProject = useCallback(async (): Promise<ProjectProjection | null | undefined> => {
+  const loadActiveProject = useCallback(async (
+    options: { skipUnchanged?: boolean } = {}
+  ): Promise<ProjectProjection | null | undefined> => {
     const generation = ++activeProjectResolutionGeneration.current
     const active = await execute('project.active')
     if (generation !== activeProjectResolutionGeneration.current) return undefined
     if (!isRecord(active.project)) return null
-    return await loadProject(projectFrom(active, copy('invalidProjectProjection')).id)
+    const resolved = projectFrom(active, copy('invalidProjectProjection'))
+    const current = stateRef.current.project
+    if (
+      options.skipUnchanged &&
+      current?.id === resolved.id &&
+      current.currentRevision === resolved.currentRevision &&
+      current.eventGeneration === resolved.eventGeneration
+    ) return resolved
+    return await loadProject(resolved.id)
   }, [copy, execute, loadProject])
 
   const loadProjectPackageSnapshot = useCallback(async (
@@ -786,6 +797,29 @@ export function useEditorController(client: ExtensionHostClient): EditorControll
     void initializeEditor()
     return () => { initializationGeneration.current += 1 }
   }, [initializeEditor])
+
+  useEffect(() => {
+    if (!state.initialized) return
+    let disposed = false
+    let reconciling = false
+    const reconcile = (): void => {
+      if (disposed || reconciling) return
+      reconciling = true
+      void loadActiveProject({ skipUnchanged: true })
+        .then(async (project) => {
+          if (disposed || project !== null || !stateRef.current.project) return
+          await releaseAllLeases()
+          if (!disposed) dispatch({ type: 'clear-project' })
+        })
+        .catch(() => undefined)
+        .finally(() => { reconciling = false })
+    }
+    const interval = globalThis.setInterval(reconcile, ACTIVE_PROJECT_RECONCILE_INTERVAL_MS)
+    return () => {
+      disposed = true
+      globalThis.clearInterval(interval)
+    }
+  }, [loadActiveProject, releaseAllLeases, state.initialized])
 
   useEffect(() => {
     const errorSubscription = client.onDidError((error) => pushNotice(classifyError(

@@ -126,7 +126,7 @@ Five version dimensions are independent:
 
 The private Kun/Host `rpcVersion` is not declared in the Manifest. Do not raise the package version as a substitute for declaring API or state compatibility. See [Versioning and migration](./versioning-and-migrations.en.md).
 
-The optional v1 `signature` shape is `{ "algorithm": "ed25519", "keyId": "...", "value": "..." }`. It is provenance evidence, not proof of a security audit. Package bytes, Index SHA-256, and file integrity are still verified separately.
+The optional v1 `signature` shape is `{ "algorithm": "ed25519", "keyId": "...", "value": "..." }`. It carries publisher-provided provenance metadata, but the current host does not cryptographically verify it and reports it as `present-unverified`. Package bytes, Index SHA-256, and file integrity are still verified separately.
 
 ## Entries
 

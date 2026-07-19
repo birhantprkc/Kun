@@ -2215,6 +2215,46 @@ describe('video editor artifact controller integration', () => {
     })
   })
 
+  it('reconciles the active project when its Host notification is missed', async () => {
+    vi.useFakeTimers()
+    const first = { ...makeViewProject(), id: 'project-first', name: 'First' }
+    const second = { ...makeViewProject(), id: 'project-second', name: 'Second' }
+    let activeProject = first
+    const executeCommand = vi.fn(async (_id: string, args?: JsonValue) => {
+      const request = isRecord(args) ? args : {}
+      const action = request.action
+      const payload = isRecord(request.payload) ? request.payload : {}
+      if (action === 'project.list') return { content: { projects: [] } }
+      if (action === 'render.list') return { content: { records: [] } }
+      if (action === 'project.active') return { content: { project: activeProject } }
+      if (action === 'project.get') {
+        return { content: { project: payload.projectId === second.id ? second : first } }
+      }
+      return { content: {} }
+    })
+    const { client } = fakeClient({ executeCommand })
+    let controller: EditorController | undefined
+    await act(async () => {
+      renderer = create(createElement(CaptureController, {
+        client, capture: (value: EditorController) => { controller = value }
+      }))
+      await flushAsync()
+    })
+    expect(controller?.state.project?.id).toBe(first.id)
+
+    activeProject = second
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+      await flushAsync()
+    })
+
+    expect(controller?.state.project?.id).toBe(second.id)
+    expect(executeCommand).toHaveBeenCalledWith('editor-request', {
+      action: 'project.get',
+      payload: { projectId: second.id }
+    })
+  })
+
   it('routes sequence, media-folder, preview, and Agent-context commands through bounded revision-safe payloads', async () => {
     const project = makeViewProject()
     const previewHistory = {

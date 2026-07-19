@@ -245,7 +245,7 @@ Index 是不可信、非可执行 JSON：
 }
 ```
 
-`description` 和 `signature` 可选。Index 的 `signature` 必须与 Manifest 使用完全相同的 `algorithm`、`keyId`、`value` 结构；安装 exact version 时两者必须逐字段匹配。字段级要求以 Index v1 Schema 为准。
+`description` 和 `signature` 可选。Index 的 `signature` 必须与 Manifest 使用完全相同的 `algorithm`、`keyId`、`value` 结构；安装 exact version 时两者必须逐字段匹配。该一致性检查不执行密码学验签，当前 Host 会将其报告为 `present-unverified`。字段级要求以 Index v1 Schema 为准。
 
 ### Index 规则
 

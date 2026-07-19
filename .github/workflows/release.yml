@@ -49,11 +49,61 @@ jobs:
         id: version
         run: node ./scripts/compute-ci-release-version.cjs
 
+  validate:
+    name: Validate release commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: prepare
+    steps:
+      - name: Check out merge commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            kun/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install Kun runtime dependencies
+        run: npm --prefix kun ci
+
+      - name: Typecheck root app
+        run: npm run typecheck
+
+      - name: Typecheck Kun runtime
+        run: npm --prefix kun run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Audit production dependencies
+        run: npm run audit:production
+
+      - name: Validate Extension release contracts
+        run: npm run check:extensions
+
+      - name: Test root app
+        run: npm run test
+
+      - name: Test Kun runtime
+        run: npm --prefix kun run test
+
   build-macos:
     name: Build macOS
     runs-on: macos-latest
     timeout-minutes: 90
-    needs: prepare
+    needs:
+      - prepare
+      - validate
     env:
       KUN_APP_VERSION: ${{ needs.prepare.outputs.version }}
       KUN_UPDATE_CHANNEL: stable
@@ -243,7 +293,9 @@ jobs:
     name: Build Windows
     runs-on: windows-latest
     timeout-minutes: 90
-    needs: prepare
+    needs:
+      - prepare
+      - validate
     env:
       KUN_APP_VERSION: ${{ needs.prepare.outputs.version }}
       KUN_UPDATE_CHANNEL: stable
@@ -321,7 +373,9 @@ jobs:
     name: Build Linux
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    needs: prepare
+    needs:
+      - prepare
+      - validate
     env:
       KUN_APP_VERSION: ${{ needs.prepare.outputs.version }}
       KUN_UPDATE_CHANNEL: stable

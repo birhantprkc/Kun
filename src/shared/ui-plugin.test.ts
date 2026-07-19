@@ -691,6 +691,7 @@ describe('buildUiPluginBackgroundCss', () => {
             position: 'top-left',
             opacity: 0.25
           },
+          composer: 'private/raw-composer.png',
           stage: 'private/raw-stage.png',
           write: 'private/raw-write.png',
           design: 'private/raw-design.png'
@@ -703,6 +704,7 @@ describe('buildUiPluginBackgroundCss', () => {
     const css = buildUiPluginBackgroundCss(result.manifest, {
       assets: {
         'private/raw-app.png': pngDataUrl,
+        'private/raw-composer.png': pngDataUrl,
         'private/raw-stage.png': pngDataUrl,
         'private/raw-write.png': pngDataUrl,
         'private/raw-design.png': pngDataUrl,

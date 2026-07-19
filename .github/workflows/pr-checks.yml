@@ -52,6 +52,9 @@ jobs:
       - name: Validate Extension schema, docs, packages, and examples
         run: npm run check:extensions
 
+      - name: Audit production dependencies
+        run: npm run audit:production
+
       - name: Test root app
         run: npm run test
 

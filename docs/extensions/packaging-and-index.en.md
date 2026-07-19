@@ -245,7 +245,7 @@ An Index is untrusted non-executable JSON:
 }
 ```
 
-`description` and `signature` are optional. The Index `signature` must use the exact same `algorithm`, `keyId`, and `value` shape as the Manifest, and every field must match when installing an exact version. Use the Index v1 Schema for field-level requirements.
+`description` and `signature` are optional. The Index `signature` must use the exact same `algorithm`, `keyId`, and `value` shape as the Manifest, and every field must match when installing an exact version. This equality check does not cryptographically verify the signature; the current host reports it as `present-unverified`. Use the Index v1 Schema for field-level requirements.
 
 ### Index rules
 

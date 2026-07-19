@@ -2595,10 +2595,10 @@ describe('AgentLoop', () => {
         id: 'long_history',
         turnId: 'turn_1',
         threadId: 'thr_1',
-        // ~125k estimated tokens: above the default soft threshold (96k) so a
-        // model-less check compacts, but below the DeepSeek v4 soft threshold
+        // ~200k estimated tokens: above the 256k fallback profile's 192k soft
+        // threshold, but below the DeepSeek v4 soft threshold
         // (750k = 0.75 * 1M) so the v4 profiles do not.
-        text: 'x'.repeat(500_000)
+        text: 'x'.repeat(800_000)
       })
     ]
 
